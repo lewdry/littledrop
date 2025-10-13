@@ -72,13 +72,7 @@
         this.ctx = null;
         this.muted = false;
         this.master = null;
-        //this.scale = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]; // C major pentatonic
-        this.scale = [
-          220.00, 246.94, 261.63, 293.66, 329.63, 392.00,
-          440.00, 493.88, 523.25, 587.33, 659.25, 784.00, 880.00, 1046.50
-        ]; // A minor pentatonic (A3–A5)
-
-
+        this.scale = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]; // C major pentatonic
         this.initialized = false;
       }
 
@@ -108,7 +102,6 @@
         gain.connect(this.master);
         const now = this.ctx.currentTime;
         osc.start(now);
-        gain.gain.value = 0.0001;
         gain.gain.linearRampToValueAtTime(0.06, now + 0.01);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
         osc.stop(now + duration + 0.02);
@@ -125,7 +118,6 @@
         gain.connect(this.master);
         const now = this.ctx.currentTime;
         osc.start(now);
-        gain.gain.value = 0.0001;
         gain.gain.linearRampToValueAtTime(0.03, now + 0.005);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
         osc.stop(now + 0.12);
@@ -154,7 +146,7 @@
           vx: 0,
           vy: 0,
           radius: 18,
-          speed: 5000,
+          speed: 160,
           isDragging: false,
           inputTarget: null,
           body: null
@@ -219,7 +211,7 @@
         for (let i = 0; i < 8; i++) {
           const x = 400 + Math.random() * 1200;
           const y = 400 + Math.random() * 1200;
-          const radius = 10 + Math.random() * 30;
+          const radius = 30 + Math.random() * 40;
           const body = Bodies.circle(x, y, radius, { isStatic: true, label: 'rock' });
           World.add(this.engine.world, body);
           this.entities.push({ type: 'rock', body, radius });
@@ -336,7 +328,7 @@
       createRipple(x, y) {
         const maxRadius = 220 + Math.random() * 60;
         this.ripples.push({ x, y, age: 0, life: 900, maxRadius });
-        const noteIndex = Math.floor(Math.random() * 14);
+        const noteIndex = Math.floor(Math.random() * 6);
         this.audioManager.playXylophoneNote(noteIndex);
       }
 
@@ -367,7 +359,7 @@
         // Ripple creation based on movement
         this.rippleTimer += dt;
         const speed = Math.sqrt(this.player.body.velocity.x ** 2 + this.player.body.velocity.y ** 2);
-        if (speed > 0.5 && this.rippleTimer > 250) {
+        if (speed > 0.5 && this.rippleTimer > 200) {
           this.createRipple(this.player.x, this.player.y);
           this.rippleTimer = 0;
         }
@@ -435,84 +427,6 @@
         const halfH = this.canvas.height / 2 / this.dpr;
         this.camera.x = Math.max(halfW, Math.min(this.worldWidth - halfW, this.camera.x));
         this.camera.y = Math.max(halfH, Math.min(this.worldHeight - halfH, this.camera.y));
-      }
-
-      drawWaterBlob(ctx, x, y, radius, velocity) {
-        const time = performance.now() / 1000;
-        const speed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
-        
-        // Calculate deformation based on velocity
-        const stretchFactor = Math.min(speed / 100, 0.4);
-        const angle = Math.atan2(velocity.y, velocity.x);
-        
-        // Create blob shape with 16 control points
-        const points = 16;
-        const coords = [];
-        
-        for (let i = 0; i < points; i++) {
-          const baseAngle = (i / points) * Math.PI * 2;
-          
-          // Random wobble that changes over time
-          const wobbleFreq = 2 + i * 0.5;
-          const wobbleAmt = 0.04 + Math.sin(time * 3 + i) * 0.02;
-          const wobble = Math.sin(time * wobbleFreq + i * 2) * wobbleAmt;
-          
-          // Stretch in direction of movement
-          let r = radius * (1 + wobble);
-          const angleDiff = baseAngle - angle;
-          const stretchInfluence = Math.cos(angleDiff);
-          
-          if (stretchInfluence > 0) {
-            r *= (1 + stretchFactor * stretchInfluence);
-          } else {
-            r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
-          }
-          
-          coords.push({
-            x: x + Math.cos(baseAngle) * r,
-            y: y + Math.sin(baseAngle) * r
-          });
-        }
-        
-        // Draw smooth blob using cardinal spline
-        ctx.beginPath();
-        ctx.moveTo(coords[0].x, coords[0].y);
-        
-        for (let i = 0; i < points; i++) {
-          const curr = coords[i];
-          const next = coords[(i + 1) % points];
-          const prev = coords[(i - 1 + points) % points];
-          const next2 = coords[(i + 2) % points];
-          
-          const tension = 0.5;
-          const cp1x = curr.x + (next.x - prev.x) / 6 * tension;
-          const cp1y = curr.y + (next.y - prev.y) / 6 * tension;
-          const cp2x = next.x - (next2.x - curr.x) / 6 * tension;
-          const cp2y = next.y - (next2.y - curr.y) / 6 * tension;
-          
-          ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
-        }
-        
-        ctx.closePath();
-        
-        // Gradient fill
-        const gradient = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, radius);
-        gradient.addColorStop(0, '#e8f7ff');
-        gradient.addColorStop(0.6, '#bfe7ff');
-        gradient.addColorStop(1, '#8dd5ff');
-        ctx.fillStyle = gradient;
-        ctx.fill();
-        
-        // Outline
-        ctx.strokeStyle = '#7dbfdf';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        
-        // Highlight
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-        ctx.beginPath();
-        ctx.arc(x - 5, y - 6, 5, 0, Math.PI * 2);
-        ctx.fill();
       }
 
       render() {
@@ -602,14 +516,32 @@
           ctx.restore();
         });
         
-        // Draw player with animated deformation
-        this.drawWaterBlob(
-          ctx,
-          this.player.x,
-          this.player.y,
-          this.player.radius,
-          this.player.body.velocity
-        );
+        // Draw player
+        const playerBreath = 1 + 0.03 * Math.sin(performance.now() / 400);
+        ctx.save();
+        ctx.translate(this.player.x, this.player.y);
+        ctx.scale(playerBreath, playerBreath);
+        
+        // Drop gradient
+        const gradient = ctx.createRadialGradient(0, -3, 0, 0, 0, this.player.radius);
+        gradient.addColorStop(0, '#e8f7ff');
+        gradient.addColorStop(0.7, '#bfe7ff');
+        gradient.addColorStop(1, '#8dd5ff');
+        ctx.fillStyle = gradient;
+        ctx.strokeStyle = '#7dbfdf';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, this.player.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Highlight
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.beginPath();
+        ctx.arc(-4, -5, 6, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.restore();
         
         // Draw ripples
         this.ripples.forEach(r => {
