@@ -3,8 +3,6 @@ name: Deploy Littledrop to GitHub Pages
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'public/**'
   workflow_dispatch:
 
 permissions:
@@ -18,10 +16,6 @@ concurrency:
 
 jobs:
   build:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
     runs-on: ubuntu-latest
 
     steps:
@@ -44,7 +38,7 @@ jobs:
         run: npm run build
         env:
           BASE_PATH: /littledrop/  
-           
+          
       # 5. Setup GitHub Pages
       - name: Setup Pages
         uses: actions/configure-pages@v4
