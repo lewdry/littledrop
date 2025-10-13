@@ -1,7 +1,10 @@
-import { defineConfig } from 'vite'
-import { svelte } from '@sveltejs/vite-plugin-svelte'
+import { defineConfig } from 'vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 
-// https://vite.dev/config/
+// Use BASE_PATH from environment (default to '/')
+const basePath = process.env.BASE_PATH || '/';
+
 export default defineConfig({
-  plugins: [svelte()],
-})
+  base: basePath,
+  plugins: [svelte()]
+});
