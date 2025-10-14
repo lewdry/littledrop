@@ -72,13 +72,10 @@
         this.ctx = null;
         this.muted = false;
         this.master = null;
-        //this.scale = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]; // C major pentatonic
         this.scale = [
           220.00, 246.94, 261.63, 293.66, 329.63, 392.00,
           440.00, 493.88, 523.25, 587.33, 659.25, 784.00, 880.00, 1046.50
         ]; // A minor pentatonic (A3–A5)
-
-
         this.initialized = false;
       }
 
@@ -164,6 +161,7 @@
         this.entities = [];
         this.paused = false;
         this.audioManager = new AudioManager();
+        this.keys = { left: false, right: false, up: false, down: false };
         
         this.lastTime = performance.now();
         this.rippleTimer = 0;
@@ -256,7 +254,15 @@
         }
         
         // Add fish (dynamic with AI)
-        for (let i = 0; i < 5; i++) {
+        const fishColors = [
+          { fill: '#ff9966', stroke: '#ff7744' },
+          { fill: '#ffcc66', stroke: '#ffaa44' },
+          { fill: '#66ccff', stroke: '#44aaff' },
+          { fill: '#cc99ff', stroke: '#aa77ff' },
+          { fill: '#ff6699', stroke: '#ff4477' }
+        ];
+        
+        for (let i = 0; i < 12; i++) {
           const x = 400 + Math.random() * 1200;
           const y = 400 + Math.random() * 1200;
           const radius = 16;
@@ -273,7 +279,9 @@
             fearRadius: 150,
             fleeTimer: 0,
             targetX: x,
-            targetY: y
+            targetY: y,
+            wanderAngle: Math.random() * Math.PI * 2,
+            color: fishColors[i % fishColors.length]
           });
         }
       }
@@ -319,6 +327,21 @@
         this.canvas.addEventListener('touchstart', onDown);
         this.canvas.addEventListener('touchmove', onMove);
         this.canvas.addEventListener('touchend', onUp);
+        
+        // Keyboard controls
+        window.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowLeft') this.keys.left = true;
+          if (e.key === 'ArrowRight') this.keys.right = true;
+          if (e.key === 'ArrowUp') this.keys.up = true;
+          if (e.key === 'ArrowDown') this.keys.down = true;
+        });
+        
+        window.addEventListener('keyup', (e) => {
+          if (e.key === 'ArrowLeft') this.keys.left = false;
+          if (e.key === 'ArrowRight') this.keys.right = false;
+          if (e.key === 'ArrowUp') this.keys.up = false;
+          if (e.key === 'ArrowDown') this.keys.down = false;
+        });
       }
 
       setupUI() {
@@ -346,7 +369,7 @@
         const dtSec = dt / 1000;
         Matter.Engine.update(this.engine, dt);
         
-        // Update player movement
+        // Update player movement from mouse/touch
         if (this.player.inputTarget) {
           const dx = this.player.inputTarget.x - this.player.body.position.x;
           const dy = this.player.inputTarget.y - this.player.body.position.y;
@@ -359,6 +382,23 @@
               y: (dy / dist) * force
             });
           }
+        }
+        
+        // Update player movement from keyboard
+        let kbForceX = 0;
+        let kbForceY = 0;
+        const kbForce = 0.0008;
+        
+        if (this.keys.left) kbForceX -= kbForce;
+        if (this.keys.right) kbForceX += kbForce;
+        if (this.keys.up) kbForceY -= kbForce;
+        if (this.keys.down) kbForceY += kbForce;
+        
+        if (kbForceX !== 0 || kbForceY !== 0) {
+          Matter.Body.applyForce(this.player.body, this.player.body.position, {
+            x: kbForceX,
+            y: kbForceY
+          });
         }
         
         this.player.x = this.player.body.position.x;
@@ -378,7 +418,9 @@
           return r.age < r.life;
         });
         
-        // Update fish AI
+        // Update fish AI with schooling behavior
+        const fishEntities = this.entities.filter(e => e.type === 'fish');
+        
         this.entities.forEach(entity => {
           if (entity.type === 'fish') {
             const dx = this.player.x - entity.body.position.x;
@@ -387,7 +429,7 @@
             
             if (dist < entity.fearRadius) {
               // Flee from player
-              const fleeForce = 0.0005;
+              const fleeForce = 0.0006;
               const nx = -dx / dist;
               const ny = -dy / dist;
               Matter.Body.applyForce(entity.body, entity.body.position, {
@@ -396,21 +438,65 @@
               });
               entity.fleeTimer = 2000;
             } else if (entity.fleeTimer <= 0) {
-              // Gentle drift
-              if (Math.random() < 0.01) {
-                entity.targetX = 400 + Math.random() * 1200;
-                entity.targetY = 400 + Math.random() * 1200;
+              // Schooling behavior with three rules: separation, alignment, cohesion
+              let separationX = 0, separationY = 0;
+              let alignmentX = 0, alignmentY = 0;
+              let cohesionX = 0, cohesionY = 0;
+              let neighborCount = 0;
+              
+              const neighborRadius = 120;
+              const separationRadius = 50;
+              
+              fishEntities.forEach(other => {
+                if (other === entity) return;
+                
+                const odx = other.body.position.x - entity.body.position.x;
+                const ody = other.body.position.y - entity.body.position.y;
+                const odist = Math.sqrt(odx * odx + ody * ody);
+                
+                if (odist < neighborRadius && odist > 0) {
+                  neighborCount++;
+                  
+                  // Separation: avoid crowding neighbors
+                  if (odist < separationRadius) {
+                    separationX -= odx / odist;
+                    separationY -= ody / odist;
+                  }
+                  
+                  // Alignment: steer towards average heading of neighbors
+                  alignmentX += other.body.velocity.x;
+                  alignmentY += other.body.velocity.y;
+                  
+                  // Cohesion: steer towards average position of neighbors
+                  cohesionX += odx;
+                  cohesionY += ody;
+                }
+              });
+              
+              if (neighborCount > 0) {
+                // Average alignment
+                alignmentX /= neighborCount;
+                alignmentY /= neighborCount;
+                
+                // Average cohesion
+                cohesionX /= neighborCount;
+                cohesionY /= neighborCount;
               }
-              const tdx = entity.targetX - entity.body.position.x;
-              const tdy = entity.targetY - entity.body.position.y;
-              const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
-              if (tdist > 10) {
-                const driftForce = 0.0001;
-                Matter.Body.applyForce(entity.body, entity.body.position, {
-                  x: (tdx / tdist) * driftForce,
-                  y: (tdy / tdist) * driftForce
-                });
-              }
+              
+              // Add random wandering
+              entity.wanderAngle += (Math.random() - 0.5) * 0.3;
+              const wanderX = Math.cos(entity.wanderAngle);
+              const wanderY = Math.sin(entity.wanderAngle);
+              
+              // Combine forces
+              const forceScale = 0.00008;
+              const totalForceX = separationX * 1.5 + alignmentX * 0.3 + cohesionX * 0.5 + wanderX * 0.8;
+              const totalForceY = separationY * 1.5 + alignmentY * 0.3 + cohesionY * 0.5 + wanderY * 0.8;
+              
+              Matter.Body.applyForce(entity.body, entity.body.position, {
+                x: totalForceX * forceScale,
+                y: totalForceY * forceScale
+              });
             } else {
               entity.fleeTimer -= dt;
             }
@@ -582,8 +668,8 @@
             const vx = entity.body.velocity.x;
             const flipX = vx < 0 ? -1 : 1;
             ctx.scale(flipX, 1);
-            ctx.fillStyle = '#ff9966';
-            ctx.strokeStyle = '#ff7744';
+            ctx.fillStyle = entity.color.fill;
+            ctx.strokeStyle = entity.color.stroke;
             ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
