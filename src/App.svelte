@@ -84,7 +84,7 @@
         this.ctx = new (window.AudioContext || window.webkitAudioContext)();
         this.master = this.ctx.createGain();
         this.master.connect(this.ctx.destination);
-        this.master.gain.value = 0.5;
+        this.master.gain.value = 0.6;
         this.initialized = true;
       }
 
@@ -116,21 +116,21 @@
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'triangle';
-        osc.frequency.value = 150;
+        osc.frequency.value = 164.81;  // Higher frequency for better audibility
         gain.gain.value = 0;
         osc.connect(gain);
         gain.connect(this.master);
         const now = this.ctx.currentTime;
         osc.start(now);
         gain.gain.value = 0.0001;
-        gain.gain.linearRampToValueAtTime(0.03, now + 0.005);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
-        osc.stop(now + 0.12);
+        gain.gain.linearRampToValueAtTime(0.08, now + 0.005);  // Increased peak volume
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);  // Shorter duration
+        osc.stop(now + 0.1);
       }
 
       setMuted(v) {
         this.muted = v;
-        if (this.master) this.master.gain.value = v ? 0 : 0.5;
+        if (this.master) this.master.gain.value = v ? 0 : 0.6;
       }
     }
 
@@ -151,7 +151,7 @@
           vx: 0,
           vy: 0,
           radius: 18,
-          speed: 5000,
+          speed: 20,
           isDragging: false,
           inputTarget: null,
           body: null
@@ -188,6 +188,21 @@
           label: 'player'
         });
         World.add(this.engine.world, this.player.body);
+
+  // Add hard world boundaries so objects can't leave the world
+  // We make walls slightly thicker and positioned on the edges of the world
+  this.boundaries = [];
+  const wallThickness = 80;
+  const halfW = this.worldWidth / 2;
+  const halfH = this.worldHeight / 2;
+
+  const top = Bodies.rectangle(halfW, -wallThickness / 2, this.worldWidth + wallThickness * 2, wallThickness, { isStatic: true, label: 'boundary' });
+  const bottom = Bodies.rectangle(halfW, this.worldHeight + wallThickness / 2, this.worldWidth + wallThickness * 2, wallThickness, { isStatic: true, label: 'boundary' });
+  const left = Bodies.rectangle(-wallThickness / 2, halfH, wallThickness, this.worldHeight + wallThickness * 2, { isStatic: true, label: 'boundary' });
+  const right = Bodies.rectangle(this.worldWidth + wallThickness / 2, halfH, wallThickness, this.worldHeight + wallThickness * 2, { isStatic: true, label: 'boundary' });
+
+  World.add(this.engine.world, [top, bottom, left, right]);
+  this.boundaries.push(top, bottom, left, right);
         
         // Collision detection
         Matter.Events.on(this.engine, 'collisionStart', (event) => {
@@ -214,27 +229,34 @@
         const { Bodies, World } = Matter;
         
         // Add rocks (static)
-        for (let i = 0; i < 8; i++) {
-          const x = 400 + Math.random() * 1200;
-          const y = 400 + Math.random() * 1200;
-          const radius = 10 + Math.random() * 30;
+        for (let i = 0; i < 11; i++) {
+          const x = 300 + Math.random() * 1400;
+          const y = 300 + Math.random() * 1400;
+          const radius = 10 + Math.random() * 15;
           const body = Bodies.circle(x, y, radius, { isStatic: true, label: 'rock' });
           World.add(this.engine.world, body);
           this.entities.push({ type: 'rock', body, radius });
         }
         
-        // Add lily pads (static)
-        for (let i = 0; i < 6; i++) {
-          const x = 300 + Math.random() * 1400;
-          const y = 300 + Math.random() * 1400;
+        // Add lily pads (heavy but pushable)
+        for (let i = 0; i < 9; i++) {
+          const x = 100 + Math.random() * 1800;
+          const y = 100 + Math.random() * 1800;
           const radius = 45;
-          const body = Bodies.circle(x, y, radius, { isStatic: true, label: 'lilypad' });
+          const angle = Math.random() * Math.PI * 2; // Random angle between 0 and 2π
+          const body = Bodies.circle(x, y, radius, {
+            frictionAir: 0.15,  // High air friction to prevent sliding too much
+            restitution: 0.2,   // Low bounciness
+            density: 0.001,     // Higher density than leaves (0.0005) but still pushable
+            label: 'lilypad',
+            angle: angle // Set initial angle
+          });
           World.add(this.engine.world, body);
-          this.entities.push({ type: 'lilypad', body, radius });
+          this.entities.push({ type: 'lilypad', body, radius, angle }); // Store the angle in the entity
         }
         
         // Add leaves (dynamic, light)
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 13; i++) {
           const x = 300 + Math.random() * 1400;
           const y = 300 + Math.random() * 1400;
           const radius = 20;
@@ -259,12 +281,14 @@
           { fill: '#ffcc66', stroke: '#ffaa44' },
           { fill: '#66ccff', stroke: '#44aaff' },
           { fill: '#cc99ff', stroke: '#aa77ff' },
-          { fill: '#ff6699', stroke: '#ff4477' }
+          { fill: '#ff6699', stroke: '#ff4477' },
+          { fill: '#1cd9ad', stroke: '#1cbba3' },
+          { fill: '#000000', stroke: '#000000' }
         ];
         
-        for (let i = 0; i < 12; i++) {
-          const x = 400 + Math.random() * 1200;
-          const y = 400 + Math.random() * 1200;
+        for (let i = 0; i < 44; i++) {
+          const x = 200 + Math.random() * 1600;
+          const y = 200 + Math.random() * 1600;
           const radius = 16;
           const body = Bodies.circle(x, y, radius, {
             frictionAir: 0.15,
@@ -276,7 +300,7 @@
             type: 'fish',
             body,
             radius,
-            fearRadius: 150,
+            fearRadius: 300,
             fleeTimer: 0,
             targetX: x,
             targetY: y,
@@ -376,7 +400,7 @@
           const dist = Math.sqrt(dx * dx + dy * dy);
           
           if (dist > 5) {
-            const force = 0.0008;
+            const force = 0.0015; // was 0.0008
             Matter.Body.applyForce(this.player.body, this.player.body.position, {
               x: (dx / dist) * force,
               y: (dy / dist) * force
@@ -427,76 +451,82 @@
             const dy = this.player.y - entity.body.position.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             
+            // Check distance to world edges
+            const edgeBuffer = 100;
+            const distToLeftEdge = entity.body.position.x;
+            const distToRightEdge = this.worldWidth - entity.body.position.x;
+            const distToTopEdge = entity.body.position.y;
+            const distToBottomEdge = this.worldHeight - entity.body.position.y;
+            
+            let edgeAvoidX = 0;
+            let edgeAvoidY = 0;
+            
+            // Add force to avoid edges
+            if (distToLeftEdge < edgeBuffer) edgeAvoidX += 1;
+            if (distToRightEdge < edgeBuffer) edgeAvoidX -= 1;
+            if (distToTopEdge < edgeBuffer) edgeAvoidY += 1;
+            if (distToBottomEdge < edgeBuffer) edgeAvoidY -= 1;
+            
             if (dist < entity.fearRadius) {
               // Flee from player
               const fleeForce = 0.0006;
               const nx = -dx / dist;
               const ny = -dy / dist;
               Matter.Body.applyForce(entity.body, entity.body.position, {
-                x: nx * fleeForce,
-                y: ny * fleeForce
+          x: nx * fleeForce,
+          y: ny * fleeForce
               });
               entity.fleeTimer = 2000;
             } else if (entity.fleeTimer <= 0) {
-              // Schooling behavior with three rules: separation, alignment, cohesion
+              // Initialize wanderAngle and wanderChangeTimer if not exists
+              if (entity.wanderAngle === undefined) {
+          entity.wanderAngle = Math.random() * Math.PI * 2;
+          entity.wanderChangeTimer = 0;
+              }
+              
+              // Update wander angle periodically
+              entity.wanderChangeTimer -= dt;
+              if (entity.wanderChangeTimer <= 0) {
+          entity.wanderAngle += (Math.random() - 0.5) * Math.PI * 0.5;
+          entity.wanderChangeTimer = 500 + Math.random() * 1000; // Change direction every 0.5-1.5 seconds
+              }
+              
+              // Calculate wander force
+              const wanderStrength = 0.0003;
+              const wanderX = Math.cos(entity.wanderAngle) * wanderStrength;
+              const wanderY = Math.sin(entity.wanderAngle) * wanderStrength;
+              
+              // Combine with edge avoidance
+              const edgeForce = 0.0004;
+              Matter.Body.applyForce(entity.body, entity.body.position, {
+          x: wanderX + edgeAvoidX * edgeForce,
+          y: wanderY + edgeAvoidY * edgeForce
+              });
+              
+              // Add some schooling behavior (reduced strength)
               let separationX = 0, separationY = 0;
-              let alignmentX = 0, alignmentY = 0;
-              let cohesionX = 0, cohesionY = 0;
               let neighborCount = 0;
               
-              const neighborRadius = 120;
-              const separationRadius = 50;
-              
               fishEntities.forEach(other => {
-                if (other === entity) return;
-                
-                const odx = other.body.position.x - entity.body.position.x;
-                const ody = other.body.position.y - entity.body.position.y;
-                const odist = Math.sqrt(odx * odx + ody * ody);
-                
-                if (odist < neighborRadius && odist > 0) {
-                  neighborCount++;
-                  
-                  // Separation: avoid crowding neighbors
-                  if (odist < separationRadius) {
-                    separationX -= odx / odist;
-                    separationY -= ody / odist;
-                  }
-                  
-                  // Alignment: steer towards average heading of neighbors
-                  alignmentX += other.body.velocity.x;
-                  alignmentY += other.body.velocity.y;
-                  
-                  // Cohesion: steer towards average position of neighbors
-                  cohesionX += odx;
-                  cohesionY += ody;
-                }
+          if (other === entity) return;
+          const odx = other.body.position.x - entity.body.position.x;
+          const ody = other.body.position.y - entity.body.position.y;
+          const odist = Math.sqrt(odx * odx + ody * ody);
+          
+          if (odist < 50 && odist > 0) {
+            separationX -= odx / odist;
+            separationY -= ody / odist;
+            neighborCount++;
+          }
               });
               
               if (neighborCount > 0) {
-                // Average alignment
-                alignmentX /= neighborCount;
-                alignmentY /= neighborCount;
-                
-                // Average cohesion
-                cohesionX /= neighborCount;
-                cohesionY /= neighborCount;
+          const separationForce = 0.00004;
+          Matter.Body.applyForce(entity.body, entity.body.position, {
+            x: separationX * separationForce,
+            y: separationY * separationForce
+          });
               }
-              
-              // Add random wandering
-              entity.wanderAngle += (Math.random() - 0.5) * 0.3;
-              const wanderX = Math.cos(entity.wanderAngle);
-              const wanderY = Math.sin(entity.wanderAngle);
-              
-              // Combine forces
-              const forceScale = 0.00008;
-              const totalForceX = separationX * 1.5 + alignmentX * 0.3 + cohesionX * 0.5 + wanderX * 0.8;
-              const totalForceY = separationY * 1.5 + alignmentY * 0.3 + cohesionY * 0.5 + wanderY * 0.8;
-              
-              Matter.Body.applyForce(entity.body, entity.body.position, {
-                x: totalForceX * forceScale,
-                y: totalForceY * forceScale
-              });
             } else {
               entity.fleeTimer -= dt;
             }
@@ -531,8 +561,8 @@
         const stretchFactor = Math.min(speed / 100, 0.4);
         const angle = Math.atan2(velocity.y, velocity.x);
         
-        // Create blob shape with 16 control points
-        const points = 16;
+        // Create blob shape with 17 control points
+        const points = 17;
         const coords = [];
         
         for (let i = 0; i < points; i++) {
@@ -540,7 +570,7 @@
           
           // Random wobble that changes over time
           const wobbleFreq = 2 + i * 0.5;
-          const wobbleAmt = 0.04 + Math.sin(time * 3 + i) * 0.02;
+          const wobbleAmt = 0.04 + Math.sin(time * 3 + i) * 0.03;
           const wobble = Math.sin(time * wobbleFreq + i * 2) * wobbleAmt;
           
           // Stretch in direction of movement
@@ -589,10 +619,7 @@
         ctx.fillStyle = gradient;
         ctx.fill();
         
-        // Outline
-        ctx.strokeStyle = '#7dbfdf';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+  // No outline: draw fill-only for the blob
         
         // Highlight
         ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
@@ -632,23 +659,22 @@
           const breathScale = 1 + 0.02 * Math.sin(time * 1.2 + entity.body.id);
           ctx.scale(breathScale, breathScale);
           
-          if (entity.type === 'rock') {
+            if (entity.type === 'rock') {
             ctx.fillStyle = '#e9e5df';
-            ctx.strokeStyle = '#d5d1cb';
-            ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
             ctx.fill();
-            ctx.stroke();
           } else if (entity.type === 'lilypad') {
+            // Rotate the entire lilypad including notch based on body angle
+            ctx.rotate(entity.body.angle);
+            
+            // Draw main lilypad
             ctx.fillStyle = '#d3e8c6';
-            ctx.strokeStyle = '#a8c99e';
-            ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.ellipse(0, 0, entity.radius * 1.2, entity.radius * 0.9, 0, 0, Math.PI * 2);
             ctx.fill();
-            ctx.stroke();
-            // Notch
+            
+            // Draw notch
             ctx.fillStyle = '#fdfcfa';
             ctx.beginPath();
             ctx.moveTo(entity.radius * 0.7, 0);
@@ -657,24 +683,18 @@
             ctx.fill();
           } else if (entity.type === 'leaf') {
             ctx.fillStyle = '#cbecc7';
-            ctx.strokeStyle = '#a3d69d';
-            ctx.lineWidth = 1.5;
             ctx.rotate(entity.body.angle);
             ctx.beginPath();
             ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.8, 0, 0, Math.PI * 2);
             ctx.fill();
-            ctx.stroke();
           } else if (entity.type === 'fish') {
             const vx = entity.body.velocity.x;
             const flipX = vx < 0 ? -1 : 1;
             ctx.scale(flipX, 1);
             ctx.fillStyle = entity.color.fill;
-            ctx.strokeStyle = entity.color.stroke;
-            ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
             ctx.fill();
-            ctx.stroke();
             // Tail
             ctx.beginPath();
             ctx.moveTo(-entity.radius * 1.5, 0);
@@ -682,7 +702,6 @@
             ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
             ctx.closePath();
             ctx.fill();
-            ctx.stroke();
           }
           
           ctx.restore();
@@ -704,7 +723,7 @@
           const alpha = 1 - progress;
           
           ctx.strokeStyle = `rgba(127, 191, 223, ${alpha * 0.5})`;
-          ctx.lineWidth = 3 * (1 - progress);
+          ctx.lineWidth = 4 * (1 - progress);
           ctx.beginPath();
           ctx.arc(r.x, r.y, radius, 0, Math.PI * 2);
           ctx.stroke();
