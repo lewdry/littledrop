@@ -362,7 +362,11 @@
 
         const onDown = async (e) => {
           e.preventDefault();
-          await this.audioManager.resume();
+          try {
+            await this.audioManager.resume();
+          } catch (err) {
+            console.warn('Audio initialization failed, continuing without sound:', err);
+          }
           const pointer = getPointer(e);
           this.player.isDragging = true;
           this.player.inputTarget = pointer;
@@ -405,13 +409,21 @@
 
       setupUI() {
         document.getElementById('pauseBtn').addEventListener('click', async () => {
-          await this.audioManager.resume();  // Initialize/resume audio on UI interaction
+          try {
+            await this.audioManager.resume();  // Initialize/resume audio on UI interaction
+          } catch (err) {
+            console.warn('Audio initialization failed, continuing without sound:', err);
+          }
           this.paused = !this.paused;
           document.getElementById('pauseBtn').textContent = this.paused ? '▶' : '⏸';
         });
 
         document.getElementById('muteBtn').addEventListener('click', async () => {
-          await this.audioManager.resume();  // Initialize/resume audio on UI interaction
+          try {
+            await this.audioManager.resume();  // Initialize/resume audio on UI interaction
+          } catch (err) {
+            console.warn('Audio initialization failed, continuing without sound:', err);
+          }
           this.audioManager.setMuted(!this.audioManager.muted);
           document.getElementById('muteBtn').textContent = this.audioManager.muted ? '🔇' : '🔊';
         });
