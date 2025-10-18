@@ -341,6 +341,14 @@
       }
 
       setupInput() {
+        const tryResumeAudio = async () => {
+          try {
+            await this.audioManager.resume();
+          } catch (err) {
+            console.warn('Audio initialization failed, continuing without sound:', err);
+          }
+        };
+
         const getPointer = (e) => {
           const rect = this.canvas.getBoundingClientRect();
           const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -360,9 +368,9 @@
           return { x: worldX, y: worldY };
         };
 
-        const onDown = (e) => {
+        const onDown = async (e) => {
           e.preventDefault();
-          this.audioManager.resume();
+          await tryResumeAudio();
           const pointer = getPointer(e);
           this.player.isDragging = true;
           this.player.inputTarget = pointer;
@@ -404,14 +412,22 @@
       }
 
       setupUI() {
-        document.getElementById('pauseBtn').addEventListener('click', () => {
-          this.audioManager.resume();  // Initialize/resume audio on UI interaction
+        const tryResumeAudio = async () => {
+          try {
+            await this.audioManager.resume();
+          } catch (err) {
+            console.warn('Audio initialization failed, continuing without sound:', err);
+          }
+        };
+
+        document.getElementById('pauseBtn').addEventListener('click', async () => {
+          await tryResumeAudio();  // Initialize/resume audio on UI interaction
           this.paused = !this.paused;
           document.getElementById('pauseBtn').textContent = this.paused ? '▶' : '⏸';
         });
 
-        document.getElementById('muteBtn').addEventListener('click', () => {
-          this.audioManager.resume();  // Initialize/resume audio on UI interaction
+        document.getElementById('muteBtn').addEventListener('click', async () => {
+          await tryResumeAudio();  // Initialize/resume audio on UI interaction
           this.audioManager.setMuted(!this.audioManager.muted);
           document.getElementById('muteBtn').textContent = this.audioManager.muted ? '🔇' : '🔊';
         });

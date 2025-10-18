@@ -29,6 +29,8 @@ Implemented multiple strategies to ensure audio plays reliably on mobile:
 - `AudioManager.playXylophoneNote()`: Calls `resume()` before playing, with state verification
 - `AudioManager.playCollisionSound()`: Calls `resume()` before playing, with state verification
 - `setupUI()`: Both pause and mute buttons now call `audioManager.resume()`
+- `onDown()`: Made async and awaits `audioManager.resume()` before creating ripples to ensure audio context is fully initialized before playing sounds
+- UI button handlers: Made async and await `audioManager.resume()` to properly initialize audio context
 
 ## 2. Mobile Zoom Level
 
