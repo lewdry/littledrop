@@ -39,13 +39,15 @@ On mobile, the canvas was too zoomed in by default, with rarely any elements vis
 Implemented a configurable zoom factor that automatically applies to mobile devices in portrait orientation.
 
 #### Changes Made:
-1. **Zoom Configuration Variable**: Added `this.mobileZoomFactor = 0.5` in the game constructor
+1. **Zoom Configuration Variable**: Added `this.mobileZoomFactor = 0.5` in the `LittledropGame` constructor
    - Default value of 0.5 means 2x zoom out (see twice as much of the world)
    - Can be easily adjusted by changing this single variable
    - Higher values = more zoomed out
    - Lower values = more zoomed in
 
 2. **Mobile Detection**: Detects portrait orientation by checking if `window.innerHeight > window.innerWidth`
+   - Note: This simple heuristic also triggers on desktop browsers in narrow windows
+   - This is acceptable as the zoom helps in any narrow viewport scenario
 
 3. **Zoom Application**: Applied in three key areas:
    - **Rendering**: Transform applied in `render()` method using `ctx.scale(zoomScale, zoomScale)`
@@ -53,15 +55,15 @@ Implemented a configurable zoom factor that automatically applies to mobile devi
    - **Camera Bounds**: Camera clamping adjusted to account for zoomed viewport
 
 ### Implementation Details:
-- `constructor()`: Added `mobileZoomFactor` variable with documentation
+- `constructor()`: Added `mobileZoomFactor` variable with documentation in the `LittledropGame` class
 - `render()`: Detects mobile orientation and applies zoom transform to canvas
 - `setupInput()`: Updates `getPointer()` to convert screen coordinates to world coordinates with zoom factor
 - `update()`: Updates camera bounds clamping to account for zoom
 
 ### How to Adjust Zoom:
-To experiment with different zoom levels, simply change the `mobileZoomFactor` value in the constructor:
+To experiment with different zoom levels, simply change the `mobileZoomFactor` value in the `LittledropGame` constructor:
 ```javascript
-// Line ~175 in App.svelte
+// Search for 'mobileZoomFactor' in App.svelte
 this.mobileZoomFactor = 0.5;  // Try values between 0.3 (very zoomed out) and 1.0 (no zoom)
 ```
 
