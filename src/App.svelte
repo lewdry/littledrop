@@ -360,9 +360,9 @@
           return { x: worldX, y: worldY };
         };
 
-        const onDown = (e) => {
+        const onDown = async (e) => {
           e.preventDefault();
-          this.audioManager.resume();
+          await this.audioManager.resume();
           const pointer = getPointer(e);
           this.player.isDragging = true;
           this.player.inputTarget = pointer;
@@ -404,14 +404,14 @@
       }
 
       setupUI() {
-        document.getElementById('pauseBtn').addEventListener('click', () => {
-          this.audioManager.resume();  // Initialize/resume audio on UI interaction
+        document.getElementById('pauseBtn').addEventListener('click', async () => {
+          await this.audioManager.resume();  // Initialize/resume audio on UI interaction
           this.paused = !this.paused;
           document.getElementById('pauseBtn').textContent = this.paused ? '▶' : '⏸';
         });
 
-        document.getElementById('muteBtn').addEventListener('click', () => {
-          this.audioManager.resume();  // Initialize/resume audio on UI interaction
+        document.getElementById('muteBtn').addEventListener('click', async () => {
+          await this.audioManager.resume();  // Initialize/resume audio on UI interaction
           this.audioManager.setMuted(!this.audioManager.muted);
           document.getElementById('muteBtn').textContent = this.audioManager.muted ? '🔇' : '🔊';
         });
