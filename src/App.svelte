@@ -81,51 +81,76 @@
 
       init() {
         if (this.initialized) return;
-        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-        this.master = this.ctx.createGain();
-        this.master.connect(this.ctx.destination);
-        this.master.gain.value = 0.6;
-        this.initialized = true;
+        try {
+          this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          this.master = this.ctx.createGain();
+          this.master.connect(this.ctx.destination);
+          this.master.gain.value = 0.6;
+          this.initialized = true;
+        } catch (e) {
+          console.error('Failed to initialize audio context:', e);
+        }
       }
 
-      resume() {
+      async resume() {
         if (!this.initialized) this.init();
-        if (this.ctx.state === 'suspended') return this.ctx.resume();
+        if (!this.ctx) return;
+        try {
+          if (this.ctx.state === 'suspended') {
+            await this.ctx.resume();
+          }
+        } catch (e) {
+          console.error('Failed to resume audio context:', e);
+        }
       }
 
-      playXylophoneNote(index = 0, duration = 0.35) {
+      async playXylophoneNote(index = 0, duration = 0.35) {
         if (this.muted || !this.initialized) return;
-        const freq = this.scale[Math.abs(index) % this.scale.length];
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.value = 0;
-        osc.connect(gain);
-        gain.connect(this.master);
-        const now = this.ctx.currentTime;
-        osc.start(now);
-        gain.gain.value = 0.0001;
-        gain.gain.linearRampToValueAtTime(0.06, now + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-        osc.stop(now + duration + 0.02);
+        // Always try to resume audio context before playing
+        await this.resume();
+        if (!this.ctx || this.ctx.state !== 'running') return;
+        try {
+          const freq = this.scale[Math.abs(index) % this.scale.length];
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.value = 0;
+          osc.connect(gain);
+          gain.connect(this.master);
+          const now = this.ctx.currentTime;
+          osc.start(now);
+          gain.gain.value = 0.0001;
+          gain.gain.linearRampToValueAtTime(0.06, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+          osc.stop(now + duration + 0.02);
+        } catch (e) {
+          console.error('Failed to play xylophone note:', e);
+        }
       }
 
-      playCollisionSound() {
+      async playCollisionSound() {
         if (this.muted || !this.initialized) return;
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.value = 164.81;  // Higher frequency for better audibility
-        gain.gain.value = 0;
-        osc.connect(gain);
-        gain.connect(this.master);
-        const now = this.ctx.currentTime;
-        osc.start(now);
-        gain.gain.value = 0.0001;
-        gain.gain.linearRampToValueAtTime(0.08, now + 0.005);  // Increased peak volume
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);  // Shorter duration
-        osc.stop(now + 0.1);
+        // Always try to resume audio context before playing
+        await this.resume();
+        if (!this.ctx || this.ctx.state !== 'running') return;
+        try {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = 164.81;  // Higher frequency for better audibility
+          gain.gain.value = 0;
+          osc.connect(gain);
+          gain.connect(this.master);
+          const now = this.ctx.currentTime;
+          osc.start(now);
+          gain.gain.value = 0.0001;
+          gain.gain.linearRampToValueAtTime(0.08, now + 0.005);  // Increased peak volume
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);  // Shorter duration
+          osc.stop(now + 0.1);
+        } catch (e) {
+          console.error('Failed to play collision sound:', e);
+        }
       }
 
       setMuted(v) {
@@ -143,6 +168,11 @@
         
         this.worldWidth = 2000;
         this.worldHeight = 2000;
+        
+        // Mobile zoom configuration - adjust this variable to change zoom level
+        // Higher values = more zoomed out (see more of the world)
+        // Lower values = more zoomed in (see less of the world)
+        this.mobileZoomFactor = 0.5;  // Default 0.5 (zoomed out to 50% of normal)
         
         this.camera = { x: 1000, y: 1000 };
         this.player = {
@@ -316,13 +346,18 @@
           const clientX = e.touches ? e.touches[0].clientX : e.clientX;
           const clientY = e.touches ? e.touches[0].clientY : e.clientY;
           
-          const x = (clientX - rect.left) * (this.canvas.width / rect.width) / this.dpr;
-          const y = (clientY - rect.top) * (this.canvas.height / rect.height) / this.dpr;
+          const canvasX = (clientX - rect.left) * (this.canvas.width / rect.width) / this.dpr;
+          const canvasY = (clientY - rect.top) * (this.canvas.height / rect.height) / this.dpr;
           
-          return {
-            x: x + this.camera.x - this.canvas.width / 2 / this.dpr,
-            y: y + this.camera.y - this.canvas.height / 2 / this.dpr
-          };
+          // Account for mobile zoom
+          const isMobile = window.innerHeight > window.innerWidth;
+          const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+          
+          // Convert from canvas coordinates to world coordinates with zoom
+          const worldX = this.camera.x + (canvasX - this.canvas.width / 2 / this.dpr) / zoomScale;
+          const worldY = this.camera.y + (canvasY - this.canvas.height / 2 / this.dpr) / zoomScale;
+          
+          return { x: worldX, y: worldY };
         };
 
         const onDown = (e) => {
@@ -370,11 +405,13 @@
 
       setupUI() {
         document.getElementById('pauseBtn').addEventListener('click', () => {
+          this.audioManager.resume();  // Initialize/resume audio on UI interaction
           this.paused = !this.paused;
           document.getElementById('pauseBtn').textContent = this.paused ? '▶' : '⏸';
         });
 
         document.getElementById('muteBtn').addEventListener('click', () => {
+          this.audioManager.resume();  // Initialize/resume audio on UI interaction
           this.audioManager.setMuted(!this.audioManager.muted);
           document.getElementById('muteBtn').textContent = this.audioManager.muted ? '🔇' : '🔊';
         });
@@ -546,9 +583,11 @@
         this.camera.x += (targetCameraX - this.camera.x) * 0.12;
         this.camera.y += (targetCameraY - this.camera.y) * 0.12;
         
-        // Clamp camera to world bounds
-        const halfW = this.canvas.width / 2 / this.dpr;
-        const halfH = this.canvas.height / 2 / this.dpr;
+        // Clamp camera to world bounds (account for mobile zoom)
+        const isMobile = window.innerHeight > window.innerWidth;
+        const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+        const halfW = (this.canvas.width / 2 / this.dpr) / zoomScale;
+        const halfH = (this.canvas.height / 2 / this.dpr) / zoomScale;
         this.camera.x = Math.max(halfW, Math.min(this.worldWidth - halfW, this.camera.x));
         this.camera.y = Math.max(halfH, Math.min(this.worldHeight - halfH, this.camera.y));
       }
@@ -639,8 +678,14 @@
         ctx.fillStyle = '#fdfcfa';
         ctx.fillRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
         
-        // Transform to world space
-        ctx.translate(-this.camera.x + this.canvas.width / 2 / dpr, -this.camera.y + this.canvas.height / 2 / dpr);
+        // Apply mobile zoom if in portrait orientation
+        const isMobile = window.innerHeight > window.innerWidth;
+        const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+        
+        // Transform to world space with zoom
+        ctx.translate(this.canvas.width / 2 / dpr, this.canvas.height / 2 / dpr);
+        ctx.scale(zoomScale, zoomScale);
+        ctx.translate(-this.camera.x, -this.camera.y);
         
         // Draw world boundary
         ctx.strokeStyle = '#e5e5e5';
