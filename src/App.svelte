@@ -174,8 +174,8 @@
   this.lastTapTime = 0; // for double-tap detection
     // distance (in world pixels) from the player within which a double-tap/click
     // will trigger a whirlpool. Adjust this value to change how close the
-    // interaction must be. (Assumption: 160px is a good default.)
-    this.whirlpoolProximity = 160;
+    // interaction must be. (Assumption: 100px is a good default.)
+    this.whirlpoolProximity = 100;
       this.entities = [];
       this.paused = false;
       this.audioManager = new AudioManager();
@@ -198,7 +198,9 @@
   this.leafImageLoaded = false;
   this.leafImage.onload = () => { this.leafImageLoaded = true; };
   this.leafImage.onerror = () => { this.leafImageLoaded = false; };
-  this.leafImage.src = '/assets/leaf.png';
+  // Use Vite's base URL so the app works when served from a subpath
+  const _base = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL) ? import.meta.env.BASE_URL : '/';
+  this.leafImage.src = _base.replace(/\/$/, '') + '/assets/leaf.png';
 
   // dev helper: allow changing palette from the console, e.g.:
   // window.setWatercolorPalette(['#fff','...'])
@@ -1094,6 +1096,23 @@
     background: #fdfcfa;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     touch-action: none;
+  }
+
+  /* Make sure the app root fills the viewport and isn't shifted by
+     `src/app.css` (which centers #app). This guarantees the canvas
+     occupies the full window on GitHub Pages and other hosts. */
+  :global(html, body, #app) {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Force the app container to cover the full viewport so flex/layout
+     rules from other stylesheets can't add centering offsets. */
+  :global(#app) {
+    position: fixed;
+    inset: 0; /* top:0; right:0; bottom:0; left:0; */
   }
 
   #gameCanvas {
