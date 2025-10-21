@@ -146,7 +146,7 @@
       this.worldRadius = this.worldDiameter / 2;
       this.worldCenter = { x: this.worldRadius, y: this.worldRadius };
 
-      this.mobileZoomFactor = 0.75;
+      this.mobileZoomFactor = 0.85;
 
       // Constants for game physics and behavior
       this.FISH_FLEE_FORCE = 0.0006;
