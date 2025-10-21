@@ -571,14 +571,22 @@
         return { x: worldX, y: worldY };
       };
 
-      const onDown = async (e) => {
-        e.preventDefault();
-        await tryResumeAudio();
+      const onDown = (e) => {
+        // preventDefault needs non-passive listeners to work on mobile
+        try {
+          e.preventDefault();
+        } catch (err) {
+          // ignore if preventDefault isn't allowed
+        }
+
+        // Try to resume audio but don't await here — awaiting can block touch handling on some mobile browsers
+        tryResumeAudio();
+
         const pointer = getPointer(e);
         this.player.isDragging = true;
         this.player.inputTarget = pointer;
         this.createRipple(pointer.x, pointer.y);
-        
+
         // double-tap detection (touch only)
         if (e.touches && e.touches.length > 0) {
           const now = performance.now();
@@ -604,10 +612,11 @@
         this.player.isDragging = false;
       };
 
-      this.canvas.addEventListener('mousedown', onDown);
-      this.canvas.addEventListener('mousemove', onMove);
-      this.canvas.addEventListener('mouseup', onUp);
-      this.canvas.addEventListener('touchstart', onDown);
+  // register touch listeners as non-passive so preventDefault() works and input isn't delayed
+  this.canvas.addEventListener('mousedown', onDown, { passive: false });
+  this.canvas.addEventListener('mousemove', onMove, { passive: false });
+  this.canvas.addEventListener('mouseup', onUp, { passive: false });
+  this.canvas.addEventListener('touchstart', onDown, { passive: false });
       this.canvas.addEventListener('dblclick', (e) => {
         e.preventDefault();
         const rect = this.canvas.getBoundingClientRect();
@@ -621,8 +630,8 @@
           this.createWhirlpool(worldX, worldY);
         }
       });
-      this.canvas.addEventListener('touchmove', onMove);
-      this.canvas.addEventListener('touchend', onUp);
+      this.canvas.addEventListener('touchmove', onMove, { passive: false });
+      this.canvas.addEventListener('touchend', onUp, { passive: false });
     }
 
     setupUI() {
