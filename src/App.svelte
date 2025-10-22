@@ -39,6 +39,57 @@
       }
     }
 
+    // Try to synchronously unlock audio during a user gesture.
+    // This should be called directly from a touch/click handler (do not await).
+    unlockOnGesture() {
+      try {
+        if (!this.initialized) this.init();
+
+        // Try a fast resume call. The call itself is synchronous and helps browsers
+        // that accept resume() within a user activation.
+        try {
+          if (this.ctx && typeof this.ctx.resume === 'function') {
+            this.ctx.resume(); // do not await here
+          }
+        } catch (e) {
+          console.warn('AudioContext.resume (sync) failed:', e);
+        }
+
+        if (this.ctx && this.ctx.state === 'running') {
+          this.initialized = true;
+          return true;
+        }
+
+        // Fallback for older Safari: create a tiny oscillator and start/stop it immediately
+        if (this.ctx) {
+          const now = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const g = this.ctx.createGain();
+          g.gain.setValueAtTime(0.00001, now); // extremely low volume to avoid clicks
+
+          // Ensure master exists and is connected
+          if (!this.master) {
+            this.master = this.ctx.createGain();
+            this.master.connect(this.ctx.destination);
+            this.master.gain.value = 0.6;
+          }
+
+          osc.connect(g);
+          g.connect(this.master);
+          osc.start(now);
+          osc.stop(now + 0.01); // 10ms pulse
+
+          // optimistic mark; the node start should unlock audio in many Safari builds
+          this.initialized = true;
+          console.debug('AudioManager: unlockOnGesture attempted oscillator fallback');
+          return true;
+        }
+      } catch (err) {
+        console.warn('unlockOnGesture failed:', err);
+      }
+      return false;
+    }
+
     async resume() {
       if (!this.initialized) this.init();
       if (!this.ctx) return;
@@ -149,7 +200,7 @@
       this.worldRadius = this.worldDiameter / 2;
       this.worldCenter = { x: this.worldRadius, y: this.worldRadius };
 
-      this.mobileZoomFactor = 0.85;
+      this.mobileZoomFactor = 0.75;
 
       // Constants for game physics and behavior
       this.FISH_FLEE_FORCE = 0.0006;
@@ -582,8 +633,13 @@
           // ignore if preventDefault isn't allowed
         }
 
-        // Try to resume audio but don't await here — awaiting can block touch handling on some mobile browsers
-        tryResumeAudio();
+        // Try to synchronously unlock audio during this user gesture (do not await)
+        try {
+          this.audioManager.unlockOnGesture();
+        } catch (e) {
+          // fall back to the async resume attempt
+          tryResumeAudio();
+        }
 
         const pointer = getPointer(e);
         this.player.isDragging = true;
