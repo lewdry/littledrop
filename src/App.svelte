@@ -52,9 +52,10 @@
     }
 
     async playXylophoneNote(index = 0, duration = 0.35) {
-      if (this.muted || !this.initialized) return;
+      if (this.muted) return;
+      // Attempt to initialize/resume audio — do not early-return just because we haven't initialized yet.
       await this.resume();
-      if (!this.ctx || this.ctx.state !== 'running') return;
+      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const freq = this.scale[Math.abs(index) % this.scale.length];
         const osc = this.ctx.createOscillator();
@@ -76,9 +77,10 @@
     }
 
     async playWhirlpoolSound() {
-      if (this.muted || !this.initialized) return;
+      if (this.muted) return;
+      // Try to initialize/resume audio; allow resume() to run rather than returning early.
       await this.resume();
-      if (!this.ctx || this.ctx.state !== 'running') return;
+      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const maxStart = Math.max(0, this.scale.length - 5);
         const start = Math.floor(Math.random() * (maxStart + 1));
@@ -106,9 +108,10 @@
     }
 
     async playCollisionSound() {
-      if (this.muted || !this.initialized) return;
+      if (this.muted) return;
+      // Ensure AudioContext is resumed/initialized before playing
       await this.resume();
-      if (!this.ctx || this.ctx.state !== 'running') return;
+      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
