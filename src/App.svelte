@@ -1,6 +1,21 @@
 <script>
   import { onMount } from 'svelte';
 
+  // app-level state for splash/start
+  let game = null;
+  let showSplash = true;
+
+  function startGame() {
+    showSplash = false;
+    if (game) {
+      // try to synchronously unlock audio and then unpause
+      try { game.audioManager.unlockOnGesture(); } catch (e) { /* ignore */ }
+      // attempt to play a small note (non-blocking)
+      try { game.audioManager.playXylophoneNote(Math.floor(Math.random() * 15)); } catch (e) { /* ignore */ }
+      game.paused = false;
+    }
+  }
+
   // small helper: adjust hex color brightness by percent (-100..100)
   function shadeColor(hex, percent) {
     // strip #
@@ -246,6 +261,8 @@
   // offscreen canvas for rock texture
   this.rockTextureCanvas = document.createElement('canvas');
   this.rockTextureCtx = this.rockTextureCanvas.getContext('2d');
+    // pool of pre-generated fish textures (will be filled in setupEntities)
+    this.fishTexturePool = [];
       // default palette
       this.watercolorPalette = ['#AAC6EE', '#6290C8', '#D9F7FA', '#C7CBE5', '#DADDE7'];
 
@@ -256,6 +273,27 @@
       this.leafImage.onerror = () => { this.leafImageLoaded = false; };
       const _base = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL) ? import.meta.env.BASE_URL : '/';
       this.leafImage.src = _base.replace(/\/$/, '') + '/assets/leaf.png';
+
+  // rock image (prefer PNG over procedural texture)
+  this.rockImage = new Image();
+  this.rockImageLoaded = false;
+  this.rockImage.onload = () => { this.rockImageLoaded = true; };
+  this.rockImage.onerror = () => { this.rockImageLoaded = false; };
+  this.rockImage.src = _base.replace(/\/$/, '') + '/assets/rock.png';
+
+  // lilypad image
+  this.lilypadImage = new Image();
+  this.lilypadImageLoaded = false;
+  this.lilypadImage.onload = () => { this.lilypadImageLoaded = true; };
+  this.lilypadImage.onerror = () => { this.lilypadImageLoaded = false; };
+  this.lilypadImage.src = _base.replace(/\/$/, '') + '/assets/lilypad.png';
+
+    // grass tile image for outside area (preferred repeatable background)
+    this.grassImage = new Image();
+    this.grassImageLoaded = false;
+    this.grassImage.onload = () => { this.grassImageLoaded = true; };
+    this.grassImage.onerror = () => { this.grassImageLoaded = false; };
+    this.grassImage.src = _base.replace(/\/$/, '') + '/assets/grass.png';
 
       window.setWatercolorPalette = (pal) => this.setWatercolorPalette(pal);
 
@@ -498,6 +536,44 @@
       ctx.globalAlpha = 1;
     }
 
+    // generate a small offscreen texture for fish using the fish colors
+    generateFishTexture(canvas, fill = '#ff9966', stroke = '#ff7744') {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      // background base
+      ctx.fillStyle = fill;
+      ctx.fillRect(0, 0, w, h);
+
+      // pick pattern: stripes or dots
+      const pattern = Math.random() > 0.5 ? 'stripes' : 'dots';
+
+      if (pattern === 'stripes') {
+        const stripeCount = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < stripeCount; i++) {
+          ctx.fillStyle = shadeColor(stroke, -10 + Math.random() * 20);
+          const y = (i / stripeCount) * h - h * 0.15 + (Math.random() - 0.5) * h * 0.08;
+          ctx.beginPath();
+          ctx.ellipse(w/2, y + h*0.12, w*0.6, h*0.25, Math.PI * (Math.random() * 0.15 - 0.075), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // dots
+        const dotCount = 6 + Math.floor(Math.random() * 8);
+        for (let i = 0; i < dotCount; i++) {
+          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
+          const dx = Math.random() * w;
+          const dy = Math.random() * h;
+          const r = Math.max(2, Math.random() * (w * 0.12));
+          ctx.beginPath();
+          ctx.arc(dx, dy, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
     setWatercolorPalette(palette) {
       if (!Array.isArray(palette) || palette.length === 0) return;
       this.watercolorPalette = palette.slice();
@@ -507,6 +583,7 @@
     setupEntities() {
       const { Bodies, World } = Matter;
 
+
       for (let i = 0; i < 11; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
@@ -514,8 +591,11 @@
         const y = this.worldCenter.y + Math.sin(a) * r;
         const radius = 10 + Math.random() * 15;
         const body = Bodies.circle(x, y, radius, { isStatic: true, label: 'rock' });
+        // assign a random rotation to the rock and set the Matter body angle
+        const rotation = Math.random() * Math.PI * 2;
+        Matter.Body.setAngle(body, rotation);
         World.add(this.engine.world, body);
-        this.entities.push({ type: 'rock', body, radius });
+        this.entities.push({ type: 'rock', body, radius, rotation });
       }
 
       for (let i = 0; i < 9; i++) {
@@ -568,6 +648,22 @@
         { fill: '#000000', stroke: '#000000' }
       ];
 
+      // Pre-generate a small pool of fish textures using the actual palette so colors/tails match.
+      const poolSize = 8;
+      const texRadius = 16; // base radius used later for fish sizing
+      const texSize = Math.ceil(texRadius * 3);
+      this.fishTexturePool = this.fishTexturePool || [];
+      if (this.fishTexturePool.length === 0) {
+        for (let p = 0; p < poolSize; p++) {
+          const color = fishColors[p % fishColors.length];
+          const canvas = document.createElement('canvas');
+          canvas.width = texSize;
+          canvas.height = texSize;
+          this.generateFishTexture(canvas, color.fill, color.stroke);
+          this.fishTexturePool.push(canvas);
+        }
+      }
+
       for (let i = 0; i < 44; i++) {
         const r = (this.worldRadius - 160) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
@@ -580,6 +676,16 @@
           label: 'fish'
         });
         World.add(this.engine.world, body);
+        const color = fishColors[i % fishColors.length];
+  // reuse a pre-generated texture from the pool to save CPU at startup
+  // pick a pool texture (we'll still use the fish's color for tinting via compositing later if desired)
+  // choose pool texture aligned to the fish color so body texture hue matches the tail
+  const colorIndex = i % fishColors.length;
+  const poolTex = this.fishTexturePool[colorIndex % this.fishTexturePool.length];
+  // We could create a per-fish canvas and draw the pool texture into it and tint, but that costs CPU.
+  // For now we'll reuse the pool canvas directly as a read-only texture.
+  const tex = poolTex;
+
         this.entities.push({
           type: 'fish',
           body,
@@ -594,7 +700,8 @@
           zoomDuration: 0,
           zoomMultiplier: 1,
           inwardBias: 1,
-          color: fishColors[i % fishColors.length]
+          color,
+          texture: tex
         });
       }
     }
@@ -1002,22 +1109,32 @@
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      if (this.outsideTextureCanvas && this.outsideTextureCanvas.width > 0) {
+      // If grass is available we will render it in world-space after we apply
+      // camera transforms so it moves with the camera. Otherwise, render the
+      // static outside texture (or solid color) as before.
+      const useGrass = (this.grassImageLoaded && this.grassImage && this.grassImage.complete && this.grassImage.naturalWidth > 0);
+
+      if (!useGrass) {
+        // static background behavior (pattern or fallback color)
+        let filled = false;
         try {
-          const pattern = ctx.createPattern(this.outsideTextureCanvas, 'repeat');
-          if (pattern) {
-            ctx.fillStyle = pattern;
-          } else {
-            ctx.fillStyle = '#6B9080';
+          if (this.outsideTextureCanvas && this.outsideTextureCanvas.width > 0) {
+            const pattern = ctx.createPattern(this.outsideTextureCanvas, 'repeat');
+            if (pattern) {
+              ctx.fillStyle = pattern;
+              filled = true;
+            }
           }
         } catch (e) {
-          console.warn('Failed to create pattern:', e);
-          ctx.fillStyle = '#6B9080';
+          console.warn('Failed to create outside texture pattern:', e);
         }
+        if (!filled) ctx.fillStyle = '#6B9080';
+        ctx.fillRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
       } else {
-        ctx.fillStyle = '#6B9080';
+        // leave the canvas background unfilled here — we'll draw the grass
+        // after applying the camera transforms so it scrolls with the world.
+        ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
       }
-      ctx.fillRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
 
       const isMobile = window.innerHeight > window.innerWidth;
       const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
@@ -1025,6 +1142,25 @@
       ctx.translate(this.canvas.width / 2 / dpr, this.canvas.height / 2 / dpr);
       ctx.scale(zoomScale, zoomScale);
       ctx.translate(-this.camera.x, -this.camera.y);
+
+      // If using grass, draw the repeating grass pattern in world-space so it
+      // moves with the camera. We compute the visible world rectangle and fill
+      // it with a pattern anchored to world coordinates.
+      if (useGrass) {
+        try {
+          const grassPattern = ctx.createPattern(this.grassImage, 'repeat');
+          if (grassPattern) {
+            ctx.fillStyle = grassPattern;
+            const screenWorldW = (this.canvas.width / dpr) / zoomScale;
+            const screenWorldH = (this.canvas.height / dpr) / zoomScale;
+            const worldLeft = this.camera.x - screenWorldW / 2;
+            const worldTop = this.camera.y - screenWorldH / 2;
+            ctx.fillRect(worldLeft, worldTop, screenWorldW, screenWorldH);
+          }
+        } catch (e) {
+          console.warn('Failed to create/draw grass pattern in world-space:', e);
+        }
+      }
 
       ctx.save();
       ctx.beginPath();
@@ -1058,41 +1194,56 @@
         ctx.scale(breathScale, breathScale);
 
         if (entity.type === 'rock') {
-          // rock pattern fill
-          try {
-            const pattern = ctx.createPattern(this.rockTextureCanvas, 'repeat');
-            if (pattern) ctx.fillStyle = pattern;
-            else ctx.fillStyle = '#424342';
-          } catch (e) {
-            ctx.fillStyle = '#424342';
-          }
-          ctx.beginPath();
-          ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
-          ctx.fill();
+          // draw rock using rock image if available, otherwise use procedural pattern
+          if (this.rockImageLoaded && this.rockImage && this.rockImage.complete && this.rockImage.naturalWidth > 0) {
+            // draw the rock image centered and scaled to the rock diameter, rotated by entity.rotation
+            const iw = this.rockImage.naturalWidth;
+            const ih = this.rockImage.naturalHeight;
+            const targetSize = entity.radius * 2;
+            const scale = targetSize / Math.max(iw, ih);
+            ctx.save();
+            ctx.rotate(entity.rotation || 0);
+            ctx.drawImage(this.rockImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+            ctx.restore();
+          } else {
+            // rock pattern fill fallback
+            try {
+              const pattern = ctx.createPattern(this.rockTextureCanvas, 'repeat');
+              if (pattern) ctx.fillStyle = pattern;
+              else ctx.fillStyle = '#424342';
+            } catch (e) {
+              ctx.fillStyle = '#424342';
+            }
+            ctx.beginPath();
+            ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
+            ctx.fill();
 
-          // subtle radial shading for depth
-          ctx.globalCompositeOperation = 'source-over';
-          const g = ctx.createRadialGradient(-entity.radius*0.3, -entity.radius*0.4, 0, 0, 0, entity.radius);
-          g.addColorStop(0, 'rgba(255,255,255,0.06)');
-          g.addColorStop(0.6, 'rgba(0,0,0,0.10)');
-          g.addColorStop(1, 'rgba(0,0,0,0.28)');
-          ctx.fillStyle = g;
-          ctx.beginPath();
-          ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.globalAlpha = 1;
+            // no shadow for fallback either; keep just the pattern fill
+          }
         } else if (entity.type === 'lilypad') {
-          ctx.rotate(entity.body.angle);
-          ctx.fillStyle = '#d3e8c6';
-          ctx.beginPath();
-          ctx.ellipse(0, 0, entity.radius * 1.2, entity.radius * 0.9, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = '#ddeded';
-          ctx.beginPath();
-          ctx.moveTo(entity.radius * 0.7, 0);
-          ctx.lineTo(entity.radius * 1.2, -5);
-          ctx.lineTo(entity.radius * 1.2, 5);
-          ctx.fill();
+          // draw lilypad image if available, otherwise fallback to procedural shape
+          ctx.save();
+          ctx.rotate(entity.body.angle || 0);
+          if (this.lilypadImageLoaded && this.lilypadImage && this.lilypadImage.complete && this.lilypadImage.naturalWidth > 0) {
+            const iw = this.lilypadImage.naturalWidth;
+            const ih = this.lilypadImage.naturalHeight;
+            // scale image to roughly match the lilypad radius (use diameter)
+            const targetSize = entity.radius * 2.2;
+            const scale = targetSize / Math.max(iw, ih);
+            ctx.drawImage(this.lilypadImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+          } else {
+            ctx.fillStyle = '#d3e8c6';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, entity.radius * 1.2, entity.radius * 0.9, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ddeded';
+            ctx.beginPath();
+            ctx.moveTo(entity.radius * 0.7, 0);
+            ctx.lineTo(entity.radius * 1.2, -5);
+            ctx.lineTo(entity.radius * 1.2, 5);
+            ctx.fill();
+          }
+          ctx.restore();
         } else if (entity.type === 'leaf') {
           if (this.leafImageLoaded && this.leafImage && this.leafImage.complete && this.leafImage.naturalWidth > 0) {
             const iw = this.leafImage.naturalWidth;
@@ -1111,17 +1262,42 @@
         } else if (entity.type === 'fish') {
           const vx = entity.body.velocity.x;
           const flipX = vx < 0 ? -1 : 1;
+          ctx.save();
           ctx.scale(flipX, 1);
+
+          // target size tuned to match previous ellipse silhouette
+          const targetW = entity.radius * 3.0; // fish length
+          const targetH = entity.radius * 1.4; // fish height (ellipse ry = targetH/2 = 0.7*radius)
+
+          if (entity.texture && entity.texture.width > 0) {
+            // clip to an ellipse so texture appears in fish silhouette
+            ctx.save(); // save before clipping so we can draw the tail outside the clip
+            ctx.beginPath();
+            ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
+            ctx.clip();
+
+            // draw the texture centered and scaled to target size
+            ctx.drawImage(entity.texture, -targetW / 2, -targetH / 2, targetW, targetH);
+
+            ctx.restore(); // remove clip so tail can be drawn unmasked
+          } else {
+            // fallback: draw the plain fish shape
+            ctx.fillStyle = entity.color.fill;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // draw tail on top so the silhouette matches the original art
           ctx.fillStyle = entity.color.fill;
-          ctx.beginPath();
-          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
-          ctx.fill();
           ctx.beginPath();
           ctx.moveTo(-entity.radius * 1.5, 0);
           ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
           ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
           ctx.closePath();
           ctx.fill();
+
+          ctx.restore();
         }
 
         ctx.restore();
@@ -1200,7 +1376,9 @@
   }
 
   onMount(() => {
-    new LittledropGame();
+    // create the game and pause it until the user presses Start
+    game = new LittledropGame();
+    game.paused = true;
   });
 </script>
 
@@ -1259,8 +1437,53 @@
 
   #pauseBtn { left: 20px; }
   #muteBtn { right: 20px; }
+
+  /* splash overlay */
+  #splashOverlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(rgba(10,20,30,0.35), rgba(10,20,30,0.45));
+    z-index: 2000;
+  }
+
+  #splashCard {
+    width: min(92vw, 520px);
+    background: white;
+    border-radius: 12px;
+    padding: 28px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+    text-align: center;
+  }
+
+  #splashCard h1 { margin-bottom: 8px; font-size: 28px; }
+  #splashCard p { color: #444; margin-bottom: 18px; }
+
+  #startBtn {
+    background: #2d9cdb;
+    color: white;
+    border: none;
+    padding: 12px 22px;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  #startBtn:active { transform: scale(0.98); }
 </style>
 
 <canvas id="gameCanvas"></canvas>
 <button id="pauseBtn" class="ui-button">⏸</button>
 <button id="muteBtn" class="ui-button">🔊</button>
+
+{#if showSplash}
+  <div id="splashOverlay">
+    <div id="splashCard">
+      <h1>Littledrop</h1>
+      <p>You are Littledrop 💧<br>Tap to move 🌀<br>Sound on 🔊</p>
+      <button id="startBtn" on:click={() => startGame()}>Start</button>
+    </div>
+  </div>
+{/if}
