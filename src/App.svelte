@@ -2106,7 +2106,7 @@
   <div id="splashOverlay">
     <div id="splashCard">
       <h1>Littledrop</h1>
-      <p>You are Littledrop 💧<br>Tap to move 🌀<br>Sound on 🔊</p>
+      <p>You are Littledrop 💧<br>Tap anywhere to move 🌀<br>Double-tap to splash 🌊<br>Sound on 🔊</p>
       <button id="startBtn" on:click={() => startGame()}>Start</button>
     </div>
   </div>
