@@ -267,8 +267,27 @@
       this.paused = false;
       this.audioManager = new AudioManager();
 
+      // water blob rendering optimization: fewer points and precomputed base angles
+      this._blobPoints = 9; // reduced from 17
+      this._blobBaseCos = new Array(this._blobPoints);
+      this._blobBaseSin = new Array(this._blobPoints);
+      for (let i = 0; i < this._blobPoints; i++) {
+        const a = (i / this._blobPoints) * Math.PI * 2;
+        this._blobBaseCos[i] = Math.cos(a);
+        this._blobBaseSin[i] = Math.sin(a);
+      }
+      // preallocate blob coord objects to avoid per-frame allocations
+      const _coordsInit = new Array(this._blobPoints);
+      for (let i = 0; i < this._blobPoints; i++) _coordsInit[i] = { x: 0, y: 0 };
+      this._waterBlobCache = { lastT: 0, coords: _coordsInit };
+
       this.lastTime = performance.now();
       this.rippleTimer = 0;
+  // fixed physics timestep (ms) and accumulator to reduce physics CPU
+  this._physicsStepMs = 1000 / 30; // 30 Hz physics
+  this._physicsAccumulator = 0;
+  // frame counter used to throttle expensive per-frame ops
+  this._frameCount = 0;
   // debug flag: set to true to log large separation forces / overlaps
   this.DEBUG_FISH_SEPARATION = false;
 
@@ -285,6 +304,21 @@
     this.fishTexturePool = [];
       // default palette
       this.watercolorPalette = ['#AAC6EE', '#6290C8', '#D9F7FA', '#C7CBE5', '#DADDE7'];
+
+  // typed entity lists to avoid per-frame filtering
+  this.fishEntities = [];
+  this.leafEntities = [];
+  this.rockEntities = [];
+  this.lilypadEntities = [];
+
+  // cached canvas patterns (created on resize/setup)
+  this.outsidePattern = null;
+  this.rockPattern = null;
+  this.grassPattern = null;
+
+  // simple spatial hash used for neighbor queries (built each update)
+  this._spatialHash = null;
+  this._cellSize = null;
 
       // leaf image
       this.leafImage = new Image();
@@ -311,7 +345,15 @@
     // grass tile image for outside area (preferred repeatable background)
     this.grassImage = new Image();
     this.grassImageLoaded = false;
-    this.grassImage.onload = () => { this.grassImageLoaded = true; };
+    this.grassImage.onload = () => { 
+        this.grassImageLoaded = true;
+        try {
+          // try to create grass pattern immediately (ctx exists)
+          if (this.ctx) this.grassPattern = this.ctx.createPattern(this.grassImage, 'repeat');
+        } catch (e) {
+          this.grassPattern = null;
+        }
+      };
     this.grassImage.onerror = () => { this.grassImageLoaded = false; };
     this.grassImage.src = _base.replace(/\/$/, '') + '/assets/grass.png';
 
@@ -329,8 +371,8 @@
     isNearPlayer(x, y) {
       const dx = x - this.player.x;
       const dy = y - this.player.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      return dist <= this.whirlpoolProximity;
+      const dist2 = dx * dx + dy * dy;
+      return dist2 <= this.whirlpoolProximity * this.whirlpoolProximity;
     }
 
     setupPhysics() {
@@ -388,11 +430,24 @@
         this.outsideTextureCanvas.height = texSize;
         this.generateOutsideTexture(this.outsideTextureCanvas, '#6B9080');
 
+        // cache the outside pattern for reuse in render
+        try {
+          this.outsidePattern = this.ctx.createPattern(this.outsideTextureCanvas, 'repeat');
+        } catch (e) {
+          this.outsidePattern = null;
+        }
+
         // rock texture: keep reasonably small and repeatable
         const rockTexSize = 128;
         this.rockTextureCanvas.width = rockTexSize;
         this.rockTextureCanvas.height = rockTexSize;
         this.generateRockTexture(this.rockTextureCanvas, '#424342');
+
+        try {
+          this.rockPattern = this.ctx.createPattern(this.rockTextureCanvas, 'repeat');
+        } catch (e) {
+          this.rockPattern = null;
+        }
 
         // compute a zoom which fits the entire world inside the canvas initially
         // worldDiameter is in world space; canvas size in CSS pixels is (canvas.width / dpr)
@@ -659,7 +714,9 @@
         const rotation = Math.random() * Math.PI * 2;
         Matter.Body.setAngle(body, rotation);
         World.add(this.engine.world, body);
-        this.entities.push({ type: 'rock', body, radius, rotation });
+        const ent = { type: 'rock', body, radius, rotation };
+        this.entities.push(ent);
+        this.rockEntities.push(ent);
       }
 
       for (let i = 0; i < 8; i++) {
@@ -677,7 +734,9 @@
           angle: angle
         });
         World.add(this.engine.world, body);
-        this.entities.push({ type: 'lilypad', body, radius, angle });
+        const ent = { type: 'lilypad', body, radius, angle };
+        this.entities.push(ent);
+        this.lilypadEntities.push(ent);
       }
 
       for (let i = 0; i < 40; i++) {
@@ -692,14 +751,14 @@
           density: 0.0008,
           label: 'leaf'
         });
-        World.add(this.engine.world, body);
+  World.add(this.engine.world, body);
         // give each leaf a tiny unique drift variation so they don't all move identically
         const driftFactor = 0.8 + Math.random() * 0.4; // 0.8..1.2 multiplier
         const driftPhase = Math.random() * Math.PI * 2;
         const driftFreq = 0.6 + Math.random() * 1.2; // slow per-leaf oscillation
         const driftAmp = 0.02 + Math.random() * 0.06; // small amplitude modifier
 
-        this.entities.push({
+        const ent = {
           type: 'leaf',
           body,
           radius,
@@ -708,7 +767,9 @@
           driftPhase,
           driftFreq,
           driftAmp
-        });
+        };
+        this.entities.push(ent);
+        this.leafEntities.push(ent);
       }
 
       const fishColors = [
@@ -739,6 +800,10 @@
         }
       }
 
+      // Build a small cache of pre-tinted textures: patternIndex x colorIndex
+      this._fishPatternColorCache = this._fishPatternColorCache || {};
+      const tintFor = (fill) => shadeColor(fill || '#000000', -14);
+
       for (let i = 0; i < 35; i++) {
         const r = (this.worldRadius - 160) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
@@ -767,25 +832,28 @@
         const color = fishColors[i % fishColors.length];
   // reuse a pre-generated texture from the pool to save CPU at startup
   // pick a random pattern texture for each fish so pattern is independent of colour
-  const poolTex = this.fishTexturePool[Math.floor(Math.random() * this.fishTexturePool.length)];
-  // Create a per-fish tinted pattern canvas so the pattern matches the
-  // fish's colour (slightly darker). This is done once at setup time for
-  // performance rather than recolouring per-frame.
-  const tex = document.createElement('canvas');
-  tex.width = texSize;
-  tex.height = texSize;
-  const tctx = tex.getContext('2d');
-  // draw the pattern into the temp canvas
-  tctx.clearRect(0, 0, texSize, texSize);
-  tctx.drawImage(poolTex, 0, 0, texSize, texSize);
-  // tint the pattern to a slightly darker shade of the fill color
-  const tint = shadeColor(color.fill || '#000000', -14);
-  tctx.globalCompositeOperation = 'source-in';
-  tctx.fillStyle = tint;
-  tctx.fillRect(0, 0, texSize, texSize);
-  tctx.globalCompositeOperation = 'source-over';
+  // choose a pattern index and color index; reuse cached tinted canvas
+  const patternIndex = Math.floor(Math.random() * this.fishTexturePool.length);
+  const colorIndex = i % fishColors.length;
+  const colorKey = patternIndex + ':' + colorIndex;
+  let tex = this._fishPatternColorCache[colorKey];
+  if (!tex) {
+    const poolTex = this.fishTexturePool[patternIndex];
+    tex = document.createElement('canvas');
+    tex.width = texSize;
+    tex.height = texSize;
+    const tctx = tex.getContext('2d');
+    tctx.clearRect(0, 0, texSize, texSize);
+    tctx.drawImage(poolTex, 0, 0, texSize, texSize);
+    const tint = tintFor(color.fill || '#000000');
+    tctx.globalCompositeOperation = 'source-in';
+    tctx.fillStyle = tint;
+    tctx.fillRect(0, 0, texSize, texSize);
+    tctx.globalCompositeOperation = 'source-over';
+    this._fishPatternColorCache[colorKey] = tex;
+  }
 
-        this.entities.push({
+        const fishEnt = {
           type: 'fish',
           body,
           radius,
@@ -811,7 +879,11 @@
           goalWobbleFreq: 2 + Math.random() * 2,
           goalWobbleAmp: 0.6 + Math.random() * 1.0,
           idleTimer: 300 + Math.random() * 800
-        });
+        };
+        // assign precomputed texture
+        fishEnt.texture = tex;
+        this.entities.push(fishEnt);
+        this.fishEntities.push(fishEnt);
       }
 
     }
@@ -995,8 +1067,8 @@
       this.player.y = this.player.body.position.y;
 
       this.rippleTimer += dt;
-      const speed = Math.sqrt(this.player.body.velocity.x ** 2 + this.player.body.velocity.y ** 2);
-      if (speed > 0.5 && this.rippleTimer > 250) {
+      const speed2 = this.player.body.velocity.x ** 2 + this.player.body.velocity.y ** 2;
+      if (speed2 > 0.5 * 0.5 && this.rippleTimer > 250) {
         this.createRipple(this.player.x, this.player.y);
         this.rippleTimer = 0;
       }
@@ -1011,43 +1083,68 @@
         const progress = w.age / w.life;
         const radius = w.maxRadius * progress;
 
-        this.entities.forEach(entity => {
-          if (!['fish','leaf','lilypad'].includes(entity.type)) return;
-          const ex = entity.body.position.x - w.x;
-          const ey = entity.body.position.y - w.y;
-          const dist = Math.sqrt(ex*ex + ey*ey) || 0.0001;
-          if (dist > w.maxRadius) return;
+        // Apply whirlpool forces to fish, leaves and lilypads (iterate typed arrays for less overhead)
+        const applyTo = (list) => {
+          for (let i = 0; i < list.length; i++) {
+            const entity = list[i];
+            const ex = entity.body.position.x - w.x;
+            const ey = entity.body.position.y - w.y;
+            const dist2 = ex*ex + ey*ey;
+            if (dist2 > w.maxRadius * w.maxRadius) continue;
 
-          const nx = ex / dist;
-          const ny = ey / dist;
+            const dist = Math.sqrt(dist2) || 0.0001; // compute sqrt only when inside radius
+            const nx = ex / dist;
+            const ny = ey / dist;
 
-          const pushStrength = 0.0032 * (1 - (dist / w.maxRadius)) * (1 - progress);
-          Matter.Body.applyForce(entity.body, entity.body.position, {
-            x: nx * pushStrength,
-            y: ny * pushStrength
-          });
+            const pushStrength = 0.0032 * (1 - (dist / w.maxRadius)) * (1 - progress);
+            Matter.Body.applyForce(entity.body, entity.body.position, {
+              x: nx * pushStrength,
+              y: ny * pushStrength
+            });
 
-          const tangential = w.spin * 0.0012 * (1 - (dist / w.maxRadius)) * (1 - progress);
-          Matter.Body.applyForce(entity.body, entity.body.position, {
-            x: ny * tangential,
-            y: -nx * tangential
-          });
-        });
+            const tangential = w.spin * 0.0012 * (1 - (dist / w.maxRadius)) * (1 - progress);
+            Matter.Body.applyForce(entity.body, entity.body.position, {
+              x: ny * tangential,
+              y: -nx * tangential
+            });
+          }
+        };
+
+        applyTo(this.fishEntities);
+        applyTo(this.leafEntities);
+        applyTo(this.lilypadEntities);
 
         return w.age < w.life;
       });
 
-      const fishEntities = this.entities.filter(e => e.type === 'fish');
-  const leafEntities = this.entities.filter(e => e.type === 'leaf');
-
-      this.entities.forEach(entity => {
-        if (entity.type === 'fish') {
-          this.updateFish(entity, dt, fishEntities);
-        } else if (entity.type === 'leaf') {
-          // apply shared gust to all leaves
-          this.updateLeaf(entity, dt);
+      // Build spatial hash for neighbor queries (near-linear neighbor lookup)
+      this._cellSize = this.FISH_NEIGHBOR_DISTANCE || 140;
+      this._spatialHash = Object.create(null);
+      const insertToHash = (entity) => {
+        const x = entity.body.position.x;
+        const y = entity.body.position.y;
+        const cx = Math.floor(x / this._cellSize);
+        const cy = Math.floor(y / this._cellSize);
+        const key = cx + ':' + cy;
+        let bucket = this._spatialHash[key];
+        if (!bucket) {
+          bucket = [];
+          this._spatialHash[key] = bucket;
         }
-      });
+        bucket.push(entity);
+      };
+      for (let i = 0; i < this.fishEntities.length; i++) insertToHash(this.fishEntities[i]);
+      for (let i = 0; i < this.leafEntities.length; i++) insertToHash(this.leafEntities[i]);
+
+      // Update fish and leaves using typed arrays (no per-frame filter allocations)
+      // Throttle heavy neighbor checks by using frame parity
+      const neighborCheckThisFrame = (this._frameCount & 1) === 0; // every 2 frames
+      for (let i = 0; i < this.fishEntities.length; i++) {
+        this.updateFish(this.fishEntities[i], dt, neighborCheckThisFrame);
+      }
+      for (let i = 0; i < this.leafEntities.length; i++) {
+        this.updateLeaf(this.leafEntities[i], dt);
+      }
 
       // update shared leaf drift timer and refresh gust when needed
       this.sharedLeafDriftTimer -= dt;
@@ -1057,24 +1154,7 @@
         this.sharedLeafDriftTimer = 3000 + Math.random() * 3000;
       }
 
-      // small repellent force between leaves so they don't clump
-      for (let i = 0; i < leafEntities.length; i++) {
-        for (let j = i + 1; j < leafEntities.length; j++) {
-          const a = leafEntities[i].body.position;
-          const b = leafEntities[j].body.position;
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const dist = Math.sqrt(dx*dx + dy*dy) || 0.0001;
-          if (dist < this.LEAF_REPEL_DISTANCE && dist > 0) {
-            const push = (1 - dist / this.LEAF_REPEL_DISTANCE) * this.LEAF_REPEL_FORCE;
-            const nx = dx / dist;
-            const ny = dy / dist;
-            // apply small outward forces on each leaf
-            Matter.Body.applyForce(leafEntities[i].body, a, { x: -nx * push, y: -ny * push });
-            Matter.Body.applyForce(leafEntities[j].body, b, { x: nx * push, y: ny * push });
-          }
-        }
-      }
+      // Leaf repulsion removed (natural collisions handled by Matter.js)
 
       const targetCameraX = this.player.x;
       const targetCameraY = this.player.y;
@@ -1082,7 +1162,7 @@
       this.camera.y += (targetCameraY - this.camera.y) * 0.12;
     }
 
-    updateFish(entity, dt, fishEntities) {
+  updateFish(entity, dt, neighborCheck = true) {
       const dx = this.player.x - entity.body.position.x;
       const dy = this.player.y - entity.body.position.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
@@ -1145,61 +1225,65 @@
         let alignX = 0, alignY = 0;
         let neighborCount = 0;
 
-        fishEntities.forEach(other => {
-          if (other === entity) return;
-          const odx = other.body.position.x - entity.body.position.x;
-          const ody = other.body.position.y - entity.body.position.y;
-          const odist = Math.sqrt(odx * odx + ody * ody) || 0.0001;
+        // spatial hash neighbor search (check own cell and neighbors)
+        // This is the most expensive part; optionally skip on alternating frames
+        if (neighborCheck) {
+          const cx = Math.floor(entity.body.position.x / this._cellSize);
+          const cy = Math.floor(entity.body.position.y / this._cellSize);
+          for (let ox = cx - 1; ox <= cx + 1; ox++) {
+            for (let oy = cy - 1; oy <= cy + 1; oy++) {
+              const key = ox + ':' + oy;
+              const bucket = this._spatialHash[key];
+              if (!bucket) continue;
+              for (let bi = 0; bi < bucket.length; bi++) {
+                const other = bucket[bi];
+                if (other === entity) continue;
+                // skip non-fish entities
+                if (other.type !== 'fish') continue;
+                const odx = other.body.position.x - entity.body.position.x;
+                const ody = other.body.position.y - entity.body.position.y;
+                const odist2 = odx * odx + ody * ody;
+                const neighborDist2 = this.FISH_NEIGHBOR_DISTANCE * this.FISH_NEIGHBOR_DISTANCE;
+                if (odist2 < neighborDist2) {
+                  const odist = Math.sqrt(odist2) || 0.0001;
+                  cohesionX += other.body.position.x;
+                  cohesionY += other.body.position.y;
+                  alignX += other.body.velocity.x;
+                  alignY += other.body.velocity.y;
+                  neighborCount++;
 
-          if (odist < this.FISH_NEIGHBOR_DISTANCE) {
-            cohesionX += other.body.position.x;
-            cohesionY += other.body.position.y;
-            alignX += other.body.velocity.x;
-            alignY += other.body.velocity.y;
-            neighborCount++;
-          }
-
-          // Separation: push fish away from very close neighbors.
-          // Use a distance-scaled force and clamp the magnitude to avoid
-          // producing very large instantaneous impulses (Edge timing/FP
-          // differences could make the original constant force cause
-          // fish to teleport/swap positions when bodies overlap).
-          if (odist < this.FISH_SEPARATION_DISTANCE && odist > 0) {
-            // fraction of how deep inside the separation threshold we are (0..1)
-            const overlapFrac = Math.max(0, (this.FISH_SEPARATION_DISTANCE - odist) / this.FISH_SEPARATION_DISTANCE);
-
-            // base force scaled by overlap; small minimum so we always nudge
-            const base = this.FISH_SEPARATION_FORCE * (0.35 + 0.65 * overlapFrac);
-
-            // clamp to a reasonable maximum to avoid excessive impulses
-            const maxForce = this.FISH_SEPARATION_FORCE * 3.0;
-            const forceMag = Math.min(base, maxForce);
-
-            // safe normalization (avoid dividing by extremely small numbers)
-            const inv = 1 / Math.max(odist, 0.5);
-            const nx = -odx * inv;
-            const ny = -ody * inv;
-
-            if (this.DEBUG_FISH_SEPARATION) {
-              const recordedMag = Math.sqrt((nx * forceMag) ** 2 + (ny * forceMag) ** 2);
-              if (recordedMag > this.FISH_SEPARATION_FORCE * 0.9) {
-                console.debug('Fish separation impulse', { a: entity.body.id, b: other.body.id, odist, forceMag, recordedMag });
+                  // Separation: closer than separation distance
+                  if (odist < this.FISH_SEPARATION_DISTANCE && odist > 0) {
+                    const overlapFrac = Math.max(0, (this.FISH_SEPARATION_DISTANCE - odist) / this.FISH_SEPARATION_DISTANCE);
+                    const base = this.FISH_SEPARATION_FORCE * (0.35 + 0.65 * overlapFrac);
+                    const maxForce = this.FISH_SEPARATION_FORCE * 3.0;
+                    const forceMag = Math.min(base, maxForce);
+                    const inv = 1 / Math.max(odist, 0.5);
+                    const nx = -odx * inv;
+                    const ny = -ody * inv;
+                    Matter.Body.applyForce(entity.body, entity.body.position, {
+                      x: nx * forceMag,
+                      y: ny * forceMag
+                    });
+                  }
+                }
               }
             }
-
-            Matter.Body.applyForce(entity.body, entity.body.position, {
-              x: nx * forceMag,
-              y: ny * forceMag
-            });
           }
-        });
 
-        if (neighborCount > 0) {
-          const inv = 1 / neighborCount;
-          cohesionX = (cohesionX * inv - entity.body.position.x) * this.FISH_COHESION_FORCE;
-          cohesionY = (cohesionY * inv - entity.body.position.y) * this.FISH_COHESION_FORCE;
-          alignX = (alignX * inv) * this.FISH_ALIGNMENT_FORCE;
-          alignY = (alignY * inv) * this.FISH_ALIGNMENT_FORCE;
+          if (neighborCount > 0) {
+            const inv = 1 / neighborCount;
+            cohesionX = (cohesionX * inv - entity.body.position.x) * this.FISH_COHESION_FORCE;
+            cohesionY = (cohesionY * inv - entity.body.position.y) * this.FISH_COHESION_FORCE;
+            alignX = (alignX * inv) * this.FISH_ALIGNMENT_FORCE;
+            alignY = (alignY * inv) * this.FISH_ALIGNMENT_FORCE;
+          }
+        } else {
+          // light fallback: small random jitter to avoid completely static behaviour
+          cohesionX = 0;
+          cohesionY = 0;
+          alignX = 0;
+          alignY = 0;
         }
 
         // Base steering from wander/cohesion/alignment/edge avoidance
@@ -1305,55 +1389,43 @@
     }
 
     drawWaterBlob(ctx, x, y, radius, velocity) {
-      const time = performance.now() / 1000;
+      const points = this._blobPoints;
+      // reuse preallocated coord objects to reduce garbage
+      const cache = this._waterBlobCache || { coords: new Array(points) };
+      const coords = cache.coords;
       const speed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
-
       const stretchFactor = Math.min(speed / 100, 0.4);
       const angle = Math.atan2(velocity.y, velocity.x);
 
-      const points = 17;
-      const coords = [];
-
+      // compute coords each frame using precomputed base cos/sin (cheap trig)
       for (let i = 0; i < points; i++) {
-        const baseAngle = (i / points) * Math.PI * 2;
-        const wobbleFreq = 2 + i * 0.5;
-        const wobbleAmt = 0.04 + Math.sin(time * 3 + i) * 0.03;
-        const wobble = Math.sin(time * wobbleFreq + i * 2) * wobbleAmt;
-
+        const baseCos = this._blobBaseCos[i];
+        const baseSin = this._blobBaseSin[i];
+        const wobble = Math.sin((performance.now() / 1000) * (1.2 + i * 0.08) + i) * 0.08;
         let r = radius * (1 + wobble);
+        const baseAngle = Math.atan2(baseSin, baseCos);
         const angleDiff = baseAngle - angle;
         const stretchInfluence = Math.cos(angleDiff);
+        if (stretchInfluence > 0) r *= (1 + stretchFactor * stretchInfluence);
+        else r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
 
-        if (stretchInfluence > 0) {
-          r *= (1 + stretchFactor * stretchInfluence);
-        } else {
-          r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
-        }
-
-        coords.push({
-          x: x + Math.cos(baseAngle) * r,
-          y: y + Math.sin(baseAngle) * r
-        });
+        // mutate the preallocated object to avoid allocating a new one
+        const c = coords[i];
+        c.x = x + baseCos * r;
+        c.y = y + baseSin * r;
       }
 
+      // midpoint smoothing: move to midpoint of last and first, then quadraticCurveTo through midpoints
+      const mid = (a, b) => ({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 });
       ctx.beginPath();
-      ctx.moveTo(coords[0].x, coords[0].y);
-
+      const lastMid = mid(coords[points - 1], coords[0]);
+      ctx.moveTo(lastMid.x, lastMid.y);
       for (let i = 0; i < points; i++) {
         const curr = coords[i];
         const next = coords[(i + 1) % points];
-        const prev = coords[(i - 1 + points) % points];
-        const next2 = coords[(i + 2) % points];
-
-        const tension = 0.5;
-        const cp1x = curr.x + (next.x - prev.x) / 6 * tension;
-        const cp1y = curr.y + (next.y - prev.y) / 6 * tension;
-        const cp2x = next.x - (next2.x - curr.x) / 6 * tension;
-        const cp2y = next.y - (next2.y - curr.y) / 6 * tension;
-
-        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        const nextMid = mid(curr, next);
+        ctx.quadraticCurveTo(curr.x, curr.y, nextMid.x, nextMid.y);
       }
-
       ctx.closePath();
 
       const gradient = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, radius);
@@ -1382,12 +1454,17 @@
       const useGrass = (this.grassImageLoaded && this.grassImage && this.grassImage.complete && this.grassImage.naturalWidth > 0);
 
       if (!useGrass) {
-        // static background behavior (pattern or fallback color)
+        // static background behavior (use cached pattern if possible to avoid
+        // creating a new CanvasPattern object every frame)
         let filled = false;
         try {
-          if (this.outsideTextureCanvas && this.outsideTextureCanvas.width > 0) {
+          if (this.outsidePattern) {
+            ctx.fillStyle = this.outsidePattern;
+            filled = true;
+          } else if (this.outsideTextureCanvas && this.outsideTextureCanvas.width > 0) {
             const pattern = ctx.createPattern(this.outsideTextureCanvas, 'repeat');
             if (pattern) {
+              this.outsidePattern = pattern;
               ctx.fillStyle = pattern;
               filled = true;
             }
@@ -1415,7 +1492,13 @@
       // it with a pattern anchored to world coordinates.
       if (useGrass) {
         try {
-          const grassPattern = ctx.createPattern(this.grassImage, 'repeat');
+          // prefer a cached pattern created on image load; create+cache here as
+          // a fallback only if we don't already have one.
+          let grassPattern = this.grassPattern;
+          if (!grassPattern && this.grassImage && this.grassImage.complete && this.grassImage.naturalWidth > 0) {
+            grassPattern = ctx.createPattern(this.grassImage, 'repeat');
+            this.grassPattern = grassPattern;
+          }
           if (grassPattern) {
             ctx.fillStyle = grassPattern;
             const screenWorldW = (this.canvas.width / dpr) / zoomScale;
@@ -1595,34 +1678,33 @@
         const progress = w.age / w.life;
         const alpha = 1 - progress;
         const baseRadius = w.maxRadius * progress;
-        const rings = 3;
+        // simplified whirlpool: fewer rings and fewer saves/restores
+        const rings = 2;
         const time = performance.now() / 1000;
-
+        ctx.save();
+        ctx.translate(w.x, w.y);
         for (let i = 0; i < rings; i++) {
           const rProgress = (i + 1) / rings;
-          const radius = baseRadius * rProgress * (0.6 + 0.4 * Math.sin(time * 2 + i));
-          const spinAngle = time * w.spin * (0.8 + i * 0.3);
+          const radius = baseRadius * rProgress * (0.6 + 0.35 * Math.sin(time * 1.6 + i));
+          const spinAngle = time * w.spin * (0.8 + i * 0.25);
           ctx.save();
-          ctx.translate(w.x, w.y);
           ctx.rotate(spinAngle);
-          ctx.strokeStyle = `rgba(110,160,200, ${alpha * (0.6 - i*0.15)})`;
-          ctx.lineWidth = 3 * (1 - progress) * (1 + i * 0.4);
+          ctx.strokeStyle = `rgba(110,160,200, ${alpha * (0.6 - i*0.12)})`;
+          ctx.lineWidth = 2.5 * (1 - progress) * (1 + i * 0.3);
           ctx.beginPath();
           ctx.arc(0, 0, radius, Math.PI * 0.2, Math.PI * 1.8);
           ctx.stroke();
           ctx.restore();
         }
-
-        ctx.save();
-        ctx.translate(w.x, w.y);
+        // simple decorative lines
         ctx.rotate(time * w.spin * 1.4);
         ctx.strokeStyle = `rgba(200,230,245, ${alpha * 0.6})`;
-        ctx.lineWidth = 1.5;
-        for (let a = 0; a < 5; a++) {
-          const angle = a * Math.PI * 0.4;
+        ctx.lineWidth = 1.2;
+        for (let a = 0; a < 4; a++) {
+          const angle = a * Math.PI * 0.5;
           ctx.beginPath();
-          ctx.moveTo(Math.cos(angle) * baseRadius * 0.15, Math.sin(angle) * baseRadius * 0.15);
-          ctx.quadraticCurveTo(0, 0, Math.cos(angle + 0.6) * baseRadius * 0.5, Math.sin(angle + 0.6) * baseRadius * 0.5);
+          ctx.moveTo(Math.cos(angle) * baseRadius * 0.18, Math.sin(angle) * baseRadius * 0.18);
+          ctx.quadraticCurveTo(0, 0, Math.cos(angle + 0.6) * baseRadius * 0.45, Math.sin(angle + 0.6) * baseRadius * 0.45);
           ctx.stroke();
         }
         ctx.restore();
@@ -1636,8 +1718,19 @@
       const dt = Math.min(now - this.lastTime, 100);
       this.lastTime = now;
 
-      this.update(dt);
+      // accumulate time and step physics at fixed rate to reduce CPU
+      this._physicsAccumulator += dt;
+      while (this._physicsAccumulator >= this._physicsStepMs) {
+        // pass a fixed step in ms to update so physics runs at stable rate
+        this.update(this._physicsStepMs);
+        this._physicsAccumulator -= this._physicsStepMs;
+      }
+
+      // render with the partial dt (no physics update here)
       this.render();
+
+      // increment frame counter used for throttling neighbor checks
+      this._frameCount++;
 
       requestAnimationFrame(() => this.loop());
     }
