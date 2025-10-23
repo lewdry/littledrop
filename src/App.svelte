@@ -5,11 +5,20 @@
   let game = null;
   let showSplash = true;
 
-  function startGame() {
+  async function startGame() {
     showSplash = false;
     if (game) {
-      // try to synchronously unlock audio and then unpause
+      // try to synchronously unlock audio during this user gesture (do not await)
       try { game.audioManager.unlockOnGesture(); } catch (e) { /* ignore */ }
+
+      // animate camera zoom into gameplay over 2s, then unpause and play a note
+      try {
+        await game.zoomToGameplay(2000);
+      } catch (e) {
+        // if animation fails, continue to unpause
+        console.warn('zoomToGameplay failed:', e);
+      }
+
       // attempt to play a small note (non-blocking)
       try { game.audioManager.playXylophoneNote(Math.floor(Math.random() * 15)); } catch (e) { /* ignore */ }
       game.paused = false;
@@ -227,9 +236,11 @@
       this.FISH_NEIGHBOR_DISTANCE = 140;
       this.FISH_SEPARATION_DISTANCE = 40;
       this.LEAF_DRIFT_FORCE = 0.00005;
+  this.LEAF_REPEL_FORCE = 0.00008; // small repellent force between leaves
+  this.LEAF_REPEL_DISTANCE = 36; // radius within which repel applies
       this.PLAYER_MOVE_FORCE = 0.0015;
 
-      this.camera = { x: 1000, y: 1000 };
+  this.camera = { x: 1000, y: 1000, zoom: 1 };
       this.player = {
         x: 1000,
         y: 1000,
@@ -244,8 +255,11 @@
       this.ripples = [];
       this.whirlpools = [];
       this.lastTapTime = 0;
-      this.whirlpoolProximity = 100;
+      this.whirlpoolProximity = 400;
       this.entities = [];
+  // shared leaf drift (single gust vector applied to all leaves)
+  this.sharedLeafDrift = { vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3 };
+  this.sharedLeafDriftTimer = 2000 + Math.random() * 4000;
       this.paused = false;
       this.audioManager = new AudioManager();
 
@@ -373,6 +387,21 @@
         this.rockTextureCanvas.width = rockTexSize;
         this.rockTextureCanvas.height = rockTexSize;
         this.generateRockTexture(this.rockTextureCanvas, '#424342');
+
+        // compute a zoom which fits the entire world inside the canvas initially
+        // worldDiameter is in world space; canvas size in CSS pixels is (canvas.width / dpr)
+        const screenW = this.canvas.width / this.dpr;
+        const screenH = this.canvas.height / this.dpr;
+        const fitZoom = Math.min(screenW / this.worldDiameter, screenH / this.worldDiameter) * 0.95;
+        // keep a sensible minimum/maximum
+        this.worldFitZoom = Math.max(0.05, Math.min(2, fitZoom));
+
+        // store the target gameplay zoom (what we zoom to when starting the game)
+        const isMobile = window.innerHeight > window.innerWidth;
+        this.targetGameplayZoom = isMobile ? this.mobileZoomFactor : 1.0;
+
+        // initialize camera zoom to the fit zoom so the whole world is visible on load
+        this.camera.zoom = this.worldFitZoom;
       };
       resize();
       window.addEventListener('resize', resize);
@@ -584,7 +613,7 @@
       const { Bodies, World } = Matter;
 
 
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < 20; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -598,7 +627,7 @@
         this.entities.push({ type: 'rock', body, radius, rotation });
       }
 
-      for (let i = 0; i < 9; i++) {
+      for (let i = 0; i < 8; i++) {
         const r = (this.worldRadius - 80) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -616,7 +645,7 @@
         this.entities.push({ type: 'lilypad', body, radius, angle });
       }
 
-      for (let i = 0; i < 13; i++) {
+      for (let i = 0; i < 60; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -632,9 +661,7 @@
         this.entities.push({
           type: 'leaf',
           body,
-          radius,
-          drift: { vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5 },
-          driftChangeTimer: 2000 + Math.random() * 4000
+          radius
         });
       }
 
@@ -664,7 +691,7 @@
         }
       }
 
-      for (let i = 0; i < 44; i++) {
+      for (let i = 0; i < 35; i++) {
         const r = (this.worldRadius - 160) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -678,19 +705,17 @@
         World.add(this.engine.world, body);
         const color = fishColors[i % fishColors.length];
   // reuse a pre-generated texture from the pool to save CPU at startup
-  // pick a pool texture (we'll still use the fish's color for tinting via compositing later if desired)
   // choose pool texture aligned to the fish color so body texture hue matches the tail
   const colorIndex = i % fishColors.length;
   const poolTex = this.fishTexturePool[colorIndex % this.fishTexturePool.length];
-  // We could create a per-fish canvas and draw the pool texture into it and tint, but that costs CPU.
-  // For now we'll reuse the pool canvas directly as a read-only texture.
+  // Reuse the pool canvas directly as a read-only texture.
   const tex = poolTex;
 
         this.entities.push({
           type: 'fish',
           body,
           radius,
-          fearRadius: 300,
+          fearRadius: 200,
           fleeTimer: 0,
           wanderAngle: Math.random() * Math.PI * 2,
           wanderChangeTimer: 600 + Math.random() * 1400,
@@ -702,6 +727,14 @@
           inwardBias: 1,
           color,
           texture: tex
+          ,
+          // goal-directed wandering: null when not heading to a specific target
+          goal: null,
+          goalTimeout: 0,
+          goalWobblePhase: Math.random() * Math.PI * 2,
+          goalWobbleFreq: 2 + Math.random() * 2,
+          goalWobbleAmp: 0.6 + Math.random() * 1.0,
+          idleTimer: 300 + Math.random() * 800
         });
       }
     }
@@ -723,8 +756,8 @@
         const canvasX = (clientX - rect.left) * (this.canvas.width / rect.width) / this.dpr;
         const canvasY = (clientY - rect.top) * (this.canvas.height / rect.height) / this.dpr;
 
-        const isMobile = window.innerHeight > window.innerWidth;
-        const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+        // use the current camera zoom for pointer -> world mapping
+        const zoomScale = this.camera.zoom || 1.0;
 
         const worldX = this.camera.x + (canvasX - this.canvas.width / 2 / this.dpr) / zoomScale;
         const worldY = this.camera.y + (canvasY - this.canvas.height / 2 / this.dpr) / zoomScale;
@@ -788,8 +821,8 @@
         const rect = this.canvas.getBoundingClientRect();
         const canvasX = (e.clientX - rect.left) * (this.canvas.width / rect.width) / this.dpr;
         const canvasY = (e.clientY - rect.top) * (this.canvas.height / rect.height) / this.dpr;
-        const isMobile = window.innerHeight > window.innerWidth;
-        const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+        // use current camera zoom for coordinate mapping
+        const zoomScale = this.camera.zoom || (window.innerHeight > window.innerWidth ? this.mobileZoomFactor : 1.0);
         const worldX = this.camera.x + (canvasX - this.canvas.width / 2 / this.dpr) / zoomScale;
         const worldY = this.camera.y + (canvasY - this.canvas.height / 2 / this.dpr) / zoomScale;
         if (this.isNearPlayer(worldX, worldY)) {
@@ -822,6 +855,31 @@
       });
     }
 
+    // Animate camera zoom from current zoom to targetGameplayZoom over `duration` ms.
+    // Returns a promise that resolves when animation completes.
+    zoomToGameplay(duration = 2000) {
+      return new Promise((resolve) => {
+        const startZoom = this.camera.zoom || 1;
+        const endZoom = this.targetGameplayZoom || 1;
+        const startTime = performance.now();
+
+        const ease = (t) => 1 - Math.pow(1 - t, 3); // easeOutCubic
+
+        const step = () => {
+          const now = performance.now();
+          const elapsed = now - startTime;
+          const t = Math.min(1, elapsed / duration);
+          const e = ease(t);
+          this.camera.zoom = startZoom + (endZoom - startZoom) * e;
+
+          if (t < 1) requestAnimationFrame(step);
+          else resolve();
+        };
+
+        requestAnimationFrame(step);
+      });
+    }
+
     createRipple(x, y) {
       const maxRadius = 220 + Math.random() * 60;
       this.ripples.push({ x, y, age: 0, life: 900, maxRadius });
@@ -831,7 +889,7 @@
 
     createWhirlpool(x, y) {
       const life = 900;
-      const maxRadius = 180 + Math.random() * 60;
+      const maxRadius = 300 + Math.random() * 60;
       const spin = 1.2 + Math.random() * 1.8;
       this.whirlpools.push({ x, y, age: 0, life, maxRadius, spin });
       this.audioManager.playWhirlpoolSound();
@@ -886,7 +944,7 @@
           const nx = ex / dist;
           const ny = ey / dist;
 
-          const pushStrength = 0.0022 * (1 - (dist / w.maxRadius)) * (1 - progress);
+          const pushStrength = 0.0032 * (1 - (dist / w.maxRadius)) * (1 - progress);
           Matter.Body.applyForce(entity.body, entity.body.position, {
             x: nx * pushStrength,
             y: ny * pushStrength
@@ -903,14 +961,43 @@
       });
 
       const fishEntities = this.entities.filter(e => e.type === 'fish');
+  const leafEntities = this.entities.filter(e => e.type === 'leaf');
 
       this.entities.forEach(entity => {
         if (entity.type === 'fish') {
           this.updateFish(entity, dt, fishEntities);
-        } else if (entity.type === 'leaf' && entity.drift) {
+        } else if (entity.type === 'leaf') {
+          // apply shared gust to all leaves
           this.updateLeaf(entity, dt);
         }
       });
+
+      // update shared leaf drift timer and refresh gust when needed
+      this.sharedLeafDriftTimer -= dt;
+      if (this.sharedLeafDriftTimer <= 0) {
+        this.sharedLeafDrift.vx = (Math.random() - 0.5) * 5;
+        this.sharedLeafDrift.vy = (Math.random() - 0.5) * 5;
+        this.sharedLeafDriftTimer = 3000 + Math.random() * 3000;
+      }
+
+      // small repellent force between leaves so they don't clump
+      for (let i = 0; i < leafEntities.length; i++) {
+        for (let j = i + 1; j < leafEntities.length; j++) {
+          const a = leafEntities[i].body.position;
+          const b = leafEntities[j].body.position;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.sqrt(dx*dx + dy*dy) || 0.0001;
+          if (dist < this.LEAF_REPEL_DISTANCE && dist > 0) {
+            const push = (1 - dist / this.LEAF_REPEL_DISTANCE) * this.LEAF_REPEL_FORCE;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            // apply small outward forces on each leaf
+            Matter.Body.applyForce(leafEntities[i].body, a, { x: -nx * push, y: -ny * push });
+            Matter.Body.applyForce(leafEntities[j].body, b, { x: nx * push, y: ny * push });
+          }
+        }
+      }
 
       const targetCameraX = this.player.x;
       const targetCameraY = this.player.y;
@@ -1011,9 +1098,73 @@
           alignY = (alignY * inv) * this.FISH_ALIGNMENT_FORCE;
         }
 
-        const fx = wanderX + inwardX + cohesionX + alignX;
-        const fy = wanderY + inwardY + cohesionY + alignY;
+        // Base steering from wander/cohesion/alignment/edge avoidance
+        let fx = wanderX + inwardX + cohesionX + alignX;
+        let fy = wanderY + inwardY + cohesionY + alignY;
 
+        // Occasionally pick a far-away random goal when the fish has been idle/slow
+        const t = performance.now() / 1000;
+        const vx = entity.body.velocity.x;
+        const vy = entity.body.velocity.y;
+        const speed = Math.sqrt(vx * vx + vy * vy);
+
+        // idleTimer counts down while relatively slow; once it hits zero pick a goal
+        if (!entity.goal) {
+          if (speed < 0.06) {
+            entity.idleTimer -= dt;
+          } else {
+            // reset idle timer when moving
+            entity.idleTimer = Math.max(entity.idleTimer, 200 + Math.random() * 800);
+          }
+
+          if (entity.idleTimer <= 0) {
+            // pick a new random goal somewhere else in the water (inside world circle)
+            const angle = Math.random() * Math.PI * 2;
+            const r = Math.sqrt(Math.random()) * (this.worldRadius - 120);
+            const gx = this.worldCenter.x + Math.cos(angle) * r;
+            const gy = this.worldCenter.y + Math.sin(angle) * r;
+            entity.goal = { x: gx, y: gy };
+            entity.goalTimeout = 3000 + Math.random() * 5000;
+            // small staggers so different fish wobble differently
+            entity.goalWobblePhase = Math.random() * Math.PI * 2;
+            entity.goalWobbleFreq = 1.5 + Math.random() * 2.5;
+            entity.goalWobbleAmp = 0.5 + Math.random() * 1.2;
+          }
+        }
+
+        // If we have a goal, steer toward it with a wavy offset
+        if (entity.goal) {
+          const gdx = entity.goal.x - entity.body.position.x;
+          const gdy = entity.goal.y - entity.body.position.y;
+          const gdist = Math.sqrt(gdx * gdx + gdy * gdy) || 0.0001;
+
+          // If reached or timed out, clear the goal
+          entity.goalTimeout -= dt;
+          if (gdist < 24 || entity.goalTimeout <= 0) {
+            entity.goal = null;
+            entity.idleTimer = 800 + Math.random() * 1200;
+          } else {
+            // desired direction toward goal
+            const ndx = gdx / gdist;
+            const ndy = gdy / gdist;
+
+            // perpendicular vector for wavy motion
+            const px = -ndy;
+            const py = ndx;
+
+            // sinusoidal wobble based on time and fish-specific phase
+            const wobble = Math.sin(t * entity.goalWobbleFreq + entity.goalWobblePhase) * entity.goalWobbleAmp;
+
+            // seek force magnitude tuned a bit higher than base wander
+            const seekStrength = entity.baseSpeed * 3.0;
+
+            // add goal-directed (with wavy lateral component) to steering
+            fx += ndx * seekStrength + px * wobble * 0.0009;
+            fy += ndy * seekStrength + py * wobble * 0.0009;
+          }
+        }
+
+        // finally apply the composed force
         Matter.Body.applyForce(entity.body, entity.body.position, {
           x: fx,
           y: fy
@@ -1024,17 +1175,11 @@
     }
 
     updateLeaf(entity, dt) {
+      // apply shared gust vector to all leaves
       Matter.Body.applyForce(entity.body, entity.body.position, {
-        x: entity.drift.vx * this.LEAF_DRIFT_FORCE,
-        y: entity.drift.vy * this.LEAF_DRIFT_FORCE
+        x: this.sharedLeafDrift.vx * this.LEAF_DRIFT_FORCE,
+        y: this.sharedLeafDrift.vy * this.LEAF_DRIFT_FORCE
       });
-
-      entity.driftChangeTimer -= dt;
-      if (entity.driftChangeTimer <= 0) {
-        entity.drift.vx = (Math.random() - 0.5) * 5;
-        entity.drift.vy = (Math.random() - 0.5) * 5;
-        entity.driftChangeTimer = 2000 + Math.random() * 4000;
-      }
     }
 
     drawWaterBlob(ctx, x, y, radius, velocity) {
@@ -1136,12 +1281,12 @@
         ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
       }
 
-      const isMobile = window.innerHeight > window.innerWidth;
-      const zoomScale = isMobile ? this.mobileZoomFactor : 1.0;
+  // use the current camera zoom (may be animated between fit and gameplay)
+  const zoomScale = this.camera.zoom || (window.innerHeight > window.innerWidth ? this.mobileZoomFactor : 1.0);
 
-      ctx.translate(this.canvas.width / 2 / dpr, this.canvas.height / 2 / dpr);
-      ctx.scale(zoomScale, zoomScale);
-      ctx.translate(-this.camera.x, -this.camera.y);
+  ctx.translate(this.canvas.width / 2 / dpr, this.canvas.height / 2 / dpr);
+  ctx.scale(zoomScale, zoomScale);
+  ctx.translate(-this.camera.x, -this.camera.y);
 
       // If using grass, draw the repeating grass pattern in world-space so it
       // moves with the camera. We compute the visible world rectangle and fill
@@ -1450,7 +1595,7 @@
   }
 
   #splashCard {
-    width: min(92vw, 520px);
+    width: min(92vw, 300px);
     background: white;
     border-radius: 12px;
     padding: 28px;
