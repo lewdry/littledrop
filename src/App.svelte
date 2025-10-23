@@ -1,6 +1,24 @@
 <script>
   import { onMount } from 'svelte';
 
+  let _isLocalDev = null;
+  function isLocalDevHost() {
+    if (typeof window === 'undefined' || !window.location) {
+      return false;
+    }
+    if (_isLocalDev === null) {
+      const host = window.location.hostname;
+      _isLocalDev = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+    }
+    return _isLocalDev;
+  }
+
+  function logDevError(message, error) {
+    if (isLocalDevHost()) {
+      console.error(message, error);
+    }
+  }
+
   // app-level state for splash/start
   let game = null;
   let showSplash = true;
@@ -9,7 +27,11 @@
     showSplash = false;
     if (game) {
       // try to synchronously unlock audio during this user gesture (do not await)
-      try { game.audioManager.unlockOnGesture(); } catch (e) { /* ignore */ }
+      try {
+        game.audioManager.unlockOnGesture();
+      } catch (e) {
+        logDevError('Audio unlock during start failed', e);
+      }
 
       // animate camera zoom into gameplay over 2s, then unpause and play a note
       try {
@@ -20,7 +42,11 @@
       }
 
       // attempt to play a small note (non-blocking)
-      try { game.audioManager.playXylophoneNote(Math.floor(Math.random() * 15)); } catch (e) { /* ignore */ }
+      try {
+        game.audioManager.playXylophoneNote(Math.floor(Math.random() * 15));
+      } catch (e) {
+        logDevError('Failed to trigger start note', e);
+      }
       game.paused = false;
     }
   }
@@ -48,27 +74,58 @@
         880.00, 987.77, 1108.73, 1318.51, 1479.98, 1760.00
       ]; // A major pentatonic (A3–A5)
       this.initialized = false;
+      this._resumePromise = null;
+      this._resumeFailed = false;
+      this._unlockAttempts = 0;
+      this._maxUnlockAttempts = 3;
+      this._unlockBlocked = false;
+      this._unlockInFlight = false;
     }
 
     init() {
       if (this.initialized) return;
       try {
-        this.ctx = new AudioContext();
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) {
+          throw new Error('Web Audio API not supported');
+        }
+        this.ctx = new AudioCtx();
         this.master = this.ctx.createGain();
         this.master.connect(this.ctx.destination);
         this.master.gain.value = 0.9;
         this.initialized = true;
+        this._resumeFailed = false;
+        this._unlockAttempts = 0;
+        this._unlockBlocked = false;
       } catch (e) {
         console.error('Failed to initialize audio context:', e);
+        this.initialized = false;
+        this._resumeFailed = true;
+        this._unlockBlocked = true;
       }
     }
 
     // Try to synchronously unlock audio during a user gesture.
     // This should be called directly from a touch/click handler (do not await).
     unlockOnGesture() {
+      if (this._unlockBlocked) {
+        return this.initialized && this.ctx && this.ctx.state === 'running';
+      }
       try {
         if (!this.initialized) this.init();
-
+        if (!this.ctx) {
+          this._unlockBlocked = true;
+          return false;
+        }
+        if (this._unlockInFlight) {
+          return this.ctx.state === 'running';
+        }
+        if (this.ctx.state === 'running') {
+          this.initialized = true;
+          this._unlockAttempts = 0;
+          return true;
+        }
+        this._unlockInFlight = true;
         // Try a fast resume call. The call itself is synchronous and helps browsers
         // that accept resume() within a user activation.
         try {
@@ -81,6 +138,7 @@
 
         if (this.ctx && this.ctx.state === 'running') {
           this.initialized = true;
+          this._unlockAttempts = 0;
           return true;
         }
 
@@ -101,36 +159,80 @@
           osc.connect(g);
           g.connect(this.master);
           osc.start(now);
-          osc.stop(now + 0.01); // 10ms pulse
+          const stopAt = now + 0.01; // 10ms pulse
+          osc.stop(stopAt);
+          const cleanup = () => {
+            try {
+              osc.disconnect();
+            } catch (err) {
+              logDevError('Oscillator disconnect failed', err);
+            }
+            try {
+              g.disconnect();
+            } catch (err) {
+              logDevError('Gain disconnect failed', err);
+            }
+          };
+          osc.onended = cleanup;
+          // Safety cleanup in case onended doesn't fire (older browsers)
+          setTimeout(cleanup, 30);
 
-          // optimistic mark; the node start should unlock audio in many Safari builds
-          this.initialized = true;
+          if (this.ctx.state === 'running') {
+            this.initialized = true;
+            this._unlockAttempts = 0;
+            return true;
+          }
+
           console.debug('AudioManager: unlockOnGesture attempted oscillator fallback');
-          return true;
         }
       } catch (err) {
         console.warn('unlockOnGesture failed:', err);
+      } finally {
+        this._unlockInFlight = false;
+        if (!this.initialized) {
+          this._unlockAttempts += 1;
+          if (this._unlockAttempts >= this._maxUnlockAttempts) {
+            this._unlockBlocked = true;
+          }
+        }
       }
       return false;
     }
 
     async resume() {
+      if (this._resumeFailed) return false;
       if (!this.initialized) this.init();
-      if (!this.ctx) return;
-      try {
-        if (this.ctx.state === 'suspended') {
-          await this.ctx.resume();
+      if (!this.ctx) return false;
+      if (this.ctx.state === 'running') return true;
+      if (this._resumePromise) return this._resumePromise;
+
+      this._resumePromise = (async () => {
+        try {
+          if (typeof this.ctx.resume === 'function') {
+            await this.ctx.resume();
+          }
+          const running = this.ctx.state === 'running';
+          if (running) {
+            this.initialized = true;
+            this._resumeFailed = false;
+          }
+          return running;
+        } catch (e) {
+          console.error('Failed to resume audio context:', e);
+          this._resumeFailed = true;
+          return false;
+        } finally {
+          this._resumePromise = null;
         }
-      } catch (e) {
-        console.error('Failed to resume audio context:', e);
-      }
+      })();
+
+      return this._resumePromise;
     }
 
     async playXylophoneNote(index = 0, duration = 0.35) {
       if (this.muted) return;
-      // Attempt to initialize/resume audio — do not early-return just because we haven't initialized yet.
-      await this.resume();
-      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
+      const resumed = await this.resume();
+      if (!resumed || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const freq = this.scale[Math.abs(index) % this.scale.length];
         const osc = this.ctx.createOscillator();
@@ -153,9 +255,8 @@
 
     async playWhirlpoolSound() {
       if (this.muted) return;
-      // Try to initialize/resume audio; allow resume() to run rather than returning early.
-      await this.resume();
-      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
+      const resumed = await this.resume();
+      if (!resumed || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const maxStart = Math.max(0, this.scale.length - 5);
         const start = Math.floor(Math.random() * (maxStart + 1));
@@ -184,9 +285,8 @@
 
     async playCollisionSound() {
       if (this.muted) return;
-      // Ensure AudioContext is resumed/initialized before playing
-      await this.resume();
-      if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
+      const resumed = await this.resume();
+      if (!resumed || !this.ctx || this.ctx.state !== 'running') return;
       try {
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
@@ -235,14 +335,14 @@
       this.FISH_ALIGNMENT_FORCE = 0.00008;
       this.FISH_NEIGHBOR_DISTANCE = 140;
       this.FISH_SEPARATION_DISTANCE = 40;
+  // additional padding added to separation distance when fish are idle
+      this.FISH_MIN_PADDING = 20;
       this.LEAF_DRIFT_FORCE = 0.00005;
-  this.LEAF_REPEL_FORCE = 0.00008; // small repellent force between leaves
-  this.LEAF_REPEL_DISTANCE = 36; // radius within which repel applies
       this.PLAYER_MOVE_FORCE = 0.0015;
 
-  // Threshold for considering horizontal velocity significant enough to flip fish
-  // Prevents rapid left/right flipping when vx hovers near zero.
-  this.FISH_FACING_THRESHOLD = 0.03;
+  // Threshold and cooldown used to stabilize fish facing updates near rest
+  this.FISH_FACING_THRESHOLD = 0.06;
+  this.FISH_FACING_COOLDOWN = 220;
 
   this.camera = { x: 1000, y: 1000, zoom: 1 };
       this.player = {
@@ -286,10 +386,15 @@
   // fixed physics timestep (ms) and accumulator to reduce physics CPU
   this._physicsStepMs = 1000 / 30; // 30 Hz physics
   this._physicsAccumulator = 0;
-  // frame counter used to throttle expensive per-frame ops
-  this._frameCount = 0;
   // debug flag: set to true to log large separation forces / overlaps
   this.DEBUG_FISH_SEPARATION = false;
+
+      this._outsideTextureColor = '#6B9080';
+      this._rockTextureColor = '#424342';
+      this._pendingOutsideTextureSize = 256;
+      this._pendingRockTextureSize = 128;
+      this._needsOutsideTextureRefresh = true;
+      this._needsRockTextureRefresh = true;
 
       // offscreen watercolor canvas for the world interior
       this.watercolorCanvas = document.createElement('canvas');
@@ -300,8 +405,9 @@
   // offscreen canvas for rock texture
   this.rockTextureCanvas = document.createElement('canvas');
   this.rockTextureCtx = this.rockTextureCanvas.getContext('2d');
-    // pool of pre-generated fish textures (will be filled in setupEntities)
-    this.fishTexturePool = [];
+    this._fishTextureConfig = { radius: 16, size: Math.ceil(16 * 3), poolSize: 12 };
+    this.fishTexturePool = Array.from({ length: this._fishTextureConfig.poolSize }, () => null);
+    this._fishPatternColorCache = {};
       // default palette
       this.watercolorPalette = ['#AAC6EE', '#6290C8', '#D9F7FA', '#C7CBE5', '#DADDE7'];
 
@@ -426,28 +532,15 @@
         this.generateWatercolor(this.watercolorCanvas, this.watercolorPalette);
 
         const texSize = 256;
-        this.outsideTextureCanvas.width = texSize;
-        this.outsideTextureCanvas.height = texSize;
-        this.generateOutsideTexture(this.outsideTextureCanvas, '#6B9080');
-
-        // cache the outside pattern for reuse in render
-        try {
-          this.outsidePattern = this.ctx.createPattern(this.outsideTextureCanvas, 'repeat');
-        } catch (e) {
-          this.outsidePattern = null;
-        }
+        this._pendingOutsideTextureSize = texSize;
+        this._needsOutsideTextureRefresh = true;
+        this.outsidePattern = null;
 
         // rock texture: keep reasonably small and repeatable
         const rockTexSize = 128;
-        this.rockTextureCanvas.width = rockTexSize;
-        this.rockTextureCanvas.height = rockTexSize;
-        this.generateRockTexture(this.rockTextureCanvas, '#424342');
-
-        try {
-          this.rockPattern = this.ctx.createPattern(this.rockTextureCanvas, 'repeat');
-        } catch (e) {
-          this.rockPattern = null;
-        }
+        this._pendingRockTextureSize = rockTexSize;
+        this._needsRockTextureRefresh = true;
+        this.rockPattern = null;
 
         // compute a zoom which fits the entire world inside the canvas initially
         // worldDiameter is in world space; canvas size in CSS pixels is (canvas.width / dpr)
@@ -626,6 +719,38 @@
       ctx.globalAlpha = 1;
     }
 
+    refreshTexturesIfNeeded(ctx) {
+      if (!ctx) return;
+
+      if (this._needsOutsideTextureRefresh) {
+        const size = this._pendingOutsideTextureSize || 256;
+        this.outsideTextureCanvas.width = size;
+        this.outsideTextureCanvas.height = size;
+        try {
+          this.generateOutsideTexture(this.outsideTextureCanvas, this._outsideTextureColor);
+          this.outsidePattern = ctx.createPattern(this.outsideTextureCanvas, 'repeat');
+        } catch (e) {
+          this.outsidePattern = null;
+          logDevError('Failed to refresh outside texture', e);
+        }
+        this._needsOutsideTextureRefresh = false;
+      }
+
+      if (this._needsRockTextureRefresh) {
+        const size = this._pendingRockTextureSize || 128;
+        this.rockTextureCanvas.width = size;
+        this.rockTextureCanvas.height = size;
+        try {
+          this.generateRockTexture(this.rockTextureCanvas, this._rockTextureColor);
+          this.rockPattern = ctx.createPattern(this.rockTextureCanvas, 'repeat');
+        } catch (e) {
+          this.rockPattern = null;
+          logDevError('Failed to refresh rock texture', e);
+        }
+        this._needsRockTextureRefresh = false;
+      }
+    }
+
     // generate a small offscreen texture for fish that contains ONLY the
     // pattern (transparent background). The base fill will be drawn when
     // rendering each fish so patterns can be mixed with any colour.
@@ -691,6 +816,60 @@
           ctx.fill();
         }
       }
+    }
+
+    ensureFishPattern(index) {
+      if (!this.fishTexturePool || index < 0 || index >= this.fishTexturePool.length) return null;
+      let canvas = this.fishTexturePool[index];
+      if (!canvas) {
+        const { size } = this._fishTextureConfig;
+        canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        try {
+          this.generateFishTexture(canvas, null, '#444444');
+        } catch (e) {
+          logDevError('Failed to generate fish pattern texture', e);
+          return null;
+        }
+        this.fishTexturePool[index] = canvas;
+      }
+      return canvas;
+    }
+
+    getFishTexture(patternIndex, colorFill, keyOverride = null) {
+      const fill = colorFill || '#000000';
+      const cacheKey = keyOverride || `${patternIndex}:${fill}`;
+      let cached = this._fishPatternColorCache[cacheKey];
+      if (cached) return cached;
+
+      const patternCanvas = this.ensureFishPattern(patternIndex);
+      if (!patternCanvas) return null;
+
+      const { size } = this._fishTextureConfig;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        logDevError('Failed to obtain fish tint context', new Error('2D context unavailable'));
+        return null;
+      }
+      try {
+        ctx.clearRect(0, 0, size, size);
+        ctx.drawImage(patternCanvas, 0, 0, size, size);
+        const tint = shadeColor(fill, -14);
+        ctx.globalCompositeOperation = 'source-in';
+        ctx.fillStyle = tint;
+        ctx.fillRect(0, 0, size, size);
+        ctx.globalCompositeOperation = 'source-over';
+      } catch (e) {
+        logDevError('Failed to tint fish pattern', e);
+        return null;
+      }
+
+      this._fishPatternColorCache[cacheKey] = canvas;
+      return canvas;
     }
 
     setWatercolorPalette(palette) {
@@ -782,28 +961,6 @@
         { fill: '#474242', stroke: '#474242' }
       ];
 
-      // Pre-generate a small pool of PATTERN textures. These textures contain
-      // only the pattern drawn on a transparent background so they can be
-      // combined with any fish colour at render time for greater variation.
-      const poolSize = 12;
-      const texRadius = 16; // base radius used later for fish sizing
-      const texSize = Math.ceil(texRadius * 3);
-      this.fishTexturePool = this.fishTexturePool || [];
-      if (this.fishTexturePool.length === 0) {
-        for (let p = 0; p < poolSize; p++) {
-          const canvas = document.createElement('canvas');
-          canvas.width = texSize;
-          canvas.height = texSize;
-          // use a mid-gray stroke for patterns (so multiply doesn't produce pure black)
-          this.generateFishTexture(canvas, null, '#444444');
-          this.fishTexturePool.push(canvas);
-        }
-      }
-
-      // Build a small cache of pre-tinted textures: patternIndex x colorIndex
-      this._fishPatternColorCache = this._fishPatternColorCache || {};
-      const tintFor = (fill) => shadeColor(fill || '#000000', -14);
-
       for (let i = 0; i < 35; i++) {
         const r = (this.worldRadius - 160) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
@@ -827,31 +984,16 @@
         } catch (e) {
           // Some Matter builds may not support these helpers; fall back to
           // setting the properties directly (best-effort).
-          try { body.inertia = Infinity; body.angularVelocity = 0; } catch (e2) { /* ignore */ }
+          try {
+            body.inertia = Infinity;
+            body.angularVelocity = 0;
+          } catch (e2) {
+            logDevError('Failed to lock fish rotation', e2);
+          }
         }
         const color = fishColors[i % fishColors.length];
-  // reuse a pre-generated texture from the pool to save CPU at startup
-  // pick a random pattern texture for each fish so pattern is independent of colour
-  // choose a pattern index and color index; reuse cached tinted canvas
-  const patternIndex = Math.floor(Math.random() * this.fishTexturePool.length);
-  const colorIndex = i % fishColors.length;
-  const colorKey = patternIndex + ':' + colorIndex;
-  let tex = this._fishPatternColorCache[colorKey];
-  if (!tex) {
-    const poolTex = this.fishTexturePool[patternIndex];
-    tex = document.createElement('canvas');
-    tex.width = texSize;
-    tex.height = texSize;
-    const tctx = tex.getContext('2d');
-    tctx.clearRect(0, 0, texSize, texSize);
-    tctx.drawImage(poolTex, 0, 0, texSize, texSize);
-    const tint = tintFor(color.fill || '#000000');
-    tctx.globalCompositeOperation = 'source-in';
-    tctx.fillStyle = tint;
-    tctx.fillRect(0, 0, texSize, texSize);
-    tctx.globalCompositeOperation = 'source-over';
-    this._fishPatternColorCache[colorKey] = tex;
-  }
+        const patternIndex = Math.floor(Math.random() * this._fishTextureConfig.poolSize);
+        const textureKey = `${patternIndex}:${color.fill || ''}`;
 
         const fishEnt = {
           type: 'fish',
@@ -862,16 +1004,17 @@
           wanderAngle: Math.random() * Math.PI * 2,
           wanderChangeTimer: 600 + Math.random() * 1400,
           baseSpeed: this.FISH_BASE_SPEED,
-          zoomTimer: 1500 + Math.random() * 6000,
+          zoomTimer: 1500 + Math.random() * 4000,
           isZooming: false,
           zoomDuration: 0,
           zoomMultiplier: 1,
           inwardBias: 1,
           color,
-          texture: tex
-          ,
+          patternIndex,
+          textureKey,
           // stable facing: 1 => right, -1 => left. We'll only flip when vx magnitude is significant.
           facing: 1,
+          facingSwitchCooldown: 0,
           // goal-directed wandering: null when not heading to a specific target
           goal: null,
           goalTimeout: 0,
@@ -880,8 +1023,6 @@
           goalWobbleAmp: 0.6 + Math.random() * 1.0,
           idleTimer: 300 + Math.random() * 800
         };
-        // assign precomputed texture
-        fishEnt.texture = tex;
         this.entities.push(fishEnt);
         this.fishEntities.push(fishEnt);
       }
@@ -919,29 +1060,36 @@
         try {
           e.preventDefault();
         } catch (err) {
-          // ignore if preventDefault isn't allowed
+          logDevError('Pointer preventDefault failed', err);
         }
 
         // Try to synchronously unlock audio during this user gesture (do not await)
         try {
           this.audioManager.unlockOnGesture();
         } catch (e) {
+          logDevError('Immediate audio unlock on input failed', e);
           // fall back to the async resume attempt
           tryResumeAudio();
         }
 
         const pointer = getPointer(e);
         this.player.isDragging = true;
-        this.player.inputTarget = pointer;
-        this.createRipple(pointer.x, pointer.y);
+  this.player.inputTarget = pointer;
+  // Always create ripple at the waterblob (player) position regardless of
+  // where the user tapped. Use the Matter body position if available.
+  const rpX = this.player.body && this.player.body.position ? this.player.body.position.x : this.player.x;
+  const rpY = this.player.body && this.player.body.position ? this.player.body.position.y : this.player.y;
+  this.createRipple(rpX, rpY);
 
         // double-tap detection (touch only)
         if (e.touches && e.touches.length > 0) {
           const now = performance.now();
           if (now - this.lastTapTime < 350) {
-            if (this.isNearPlayer(pointer.x, pointer.y)) {
-              this.createWhirlpool(pointer.x, pointer.y);
-            }
+            // On double-tap, always create the whirlpool at the waterblob
+            // regardless of where the user tapped.
+            const wpX = this.player.body && this.player.body.position ? this.player.body.position.x : this.player.x;
+            const wpY = this.player.body && this.player.body.position ? this.player.body.position.y : this.player.y;
+            this.createWhirlpool(wpX, wpY);
             this.lastTapTime = 0;
           } else {
             this.lastTapTime = now;
@@ -967,16 +1115,10 @@
   this.canvas.addEventListener('touchstart', onDown, { passive: false });
       this.canvas.addEventListener('dblclick', (e) => {
         e.preventDefault();
-        const rect = this.canvas.getBoundingClientRect();
-        const canvasX = (e.clientX - rect.left) * (this.canvas.width / rect.width) / this.dpr;
-        const canvasY = (e.clientY - rect.top) * (this.canvas.height / rect.height) / this.dpr;
-        // use current camera zoom for coordinate mapping
-        const zoomScale = this.camera.zoom || (window.innerHeight > window.innerWidth ? this.mobileZoomFactor : 1.0);
-        const worldX = this.camera.x + (canvasX - this.canvas.width / 2 / this.dpr) / zoomScale;
-        const worldY = this.camera.y + (canvasY - this.canvas.height / 2 / this.dpr) / zoomScale;
-        if (this.isNearPlayer(worldX, worldY)) {
-          this.createWhirlpool(worldX, worldY);
-        }
+        // Always spawn whirlpool at the waterblob/player position on dblclick
+        const wpX = this.player.body && this.player.body.position ? this.player.body.position.x : this.player.x;
+        const wpY = this.player.body && this.player.body.position ? this.player.body.position.y : this.player.y;
+        this.createWhirlpool(wpX, wpY);
       });
       this.canvas.addEventListener('touchmove', onMove, { passive: false });
       this.canvas.addEventListener('touchend', onUp, { passive: false });
@@ -1136,9 +1278,10 @@
       for (let i = 0; i < this.fishEntities.length; i++) insertToHash(this.fishEntities[i]);
       for (let i = 0; i < this.leafEntities.length; i++) insertToHash(this.leafEntities[i]);
 
-      // Update fish and leaves using typed arrays (no per-frame filter allocations)
-      // Throttle heavy neighbor checks by using frame parity
-      const neighborCheckThisFrame = (this._frameCount & 1) === 0; // every 2 frames
+  // Update fish and leaves using typed arrays (no per-frame filter allocations)
+  // Run neighbor checks every physics step to avoid oscillation caused by
+  // intermittent steering updates that can lead to jerky forces.
+  const neighborCheckThisFrame = true;
       for (let i = 0; i < this.fishEntities.length; i++) {
         this.updateFish(this.fishEntities[i], dt, neighborCheckThisFrame);
       }
@@ -1166,6 +1309,8 @@
       const dx = this.player.x - entity.body.position.x;
       const dy = this.player.y - entity.body.position.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
+
+    entity.facingSwitchCooldown = Math.max(0, (entity.facingSwitchCooldown || 0) - dt);
 
       const edgeBuffer = 100;
       const cx = this.worldCenter.x;
@@ -1253,18 +1398,43 @@
                   neighborCount++;
 
                   // Separation: closer than separation distance
-                  if (odist < this.FISH_SEPARATION_DISTANCE && odist > 0) {
-                    const overlapFrac = Math.max(0, (this.FISH_SEPARATION_DISTANCE - odist) / this.FISH_SEPARATION_DISTANCE);
-                    const base = this.FISH_SEPARATION_FORCE * (0.35 + 0.65 * overlapFrac);
-                    const maxForce = this.FISH_SEPARATION_FORCE * 3.0;
-                    const forceMag = Math.min(base, maxForce);
-                    const inv = 1 / Math.max(odist, 0.5);
-                    const nx = -odx * inv;
-                    const ny = -ody * inv;
-                    Matter.Body.applyForce(entity.body, entity.body.position, {
-                      x: nx * forceMag,
-                      y: ny * forceMag
-                    });
+                  // compute an effective separation distance; when both fish are
+                  // effectively idle we add a small padding so they keep a little
+                  // extra space between their bodies (reduces overlap visually).
+                  const vA = Math.sqrt(entity.body.velocity.x * entity.body.velocity.x + entity.body.velocity.y * entity.body.velocity.y);
+                  const vB = Math.sqrt(other.body.velocity.x * other.body.velocity.x + other.body.velocity.y * other.body.velocity.y);
+                  const bothIdle = vA < 0.06 && vB < 0.06 && entity.fleeTimer <= 0 && (other.fleeTimer || 0) <= 0;
+                  const effectiveSep = this.FISH_SEPARATION_DISTANCE + (bothIdle ? this.FISH_MIN_PADDING : 0);
+                  if (odist < effectiveSep && odist > 0) {
+                      const overlapFrac = Math.max(0, (effectiveSep - odist) / effectiveSep);
+                      const base = this.FISH_SEPARATION_FORCE * (0.35 + 0.65 * overlapFrac);
+                      const maxForce = this.FISH_SEPARATION_FORCE * 3.0;
+                      const forceMag = Math.min(base, maxForce);
+                      const inv = 1 / Math.max(odist, 0.5);
+                      const nx = -odx * inv;
+                      const ny = -ody * inv;
+                      Matter.Body.applyForce(entity.body, entity.body.position, {
+                        x: nx * forceMag,
+                        y: ny * forceMag
+                      });
+                    // If fish are extremely close and both are nearly still (common at rest),
+                    // apply a tiny deterministic separation by nudging one body a fraction
+                    // of a pixel. This helps avoid exact overlaps which can cause
+                    // flickering due to render ordering jitter. Keep this conservative.
+                    // previously we used a tiny physics translate here to separate
+                    // extremely close idle fish. That caused micro-vibrations when
+                    // both fish repeatedly nudged each other. We now compute a
+                    // purely visual offset during render to avoid touching the
+                    // physics bodies here. No extra action required in the
+                    // physics update loop.
+                    if (this.DEBUG_FISH_SEPARATION) {
+                      console.debug('Fish separation', {
+                        fishId: entity.body.id,
+                        neighborId: other.body.id,
+                        distance: odist,
+                        force: forceMag
+                      });
+                    }
                   }
                 }
               }
@@ -1366,10 +1536,16 @@
       try {
         const vx = entity.body.velocity.x;
         if (Math.abs(vx) > this.FISH_FACING_THRESHOLD) {
-          entity.facing = vx >= 0 ? 1 : -1;
+          const desiredFacing = vx >= 0 ? 1 : -1;
+          if (desiredFacing !== entity.facing && entity.facingSwitchCooldown <= 0) {
+            entity.facing = desiredFacing;
+            entity.facingSwitchCooldown = this.FISH_FACING_COOLDOWN;
+          } else if (desiredFacing === entity.facing) {
+            entity.facingSwitchCooldown = 0;
+          }
         }
       } catch (e) {
-        // ignore if body not ready
+        logDevError('Fish facing update failed', e);
       }
     }
 
@@ -1388,7 +1564,7 @@
       });
     }
 
-    drawWaterBlob(ctx, x, y, radius, velocity) {
+    drawWaterBlob(ctx, x, y, radius, velocity, timeSeconds = null) {
       const points = this._blobPoints;
       // reuse preallocated coord objects to reduce garbage
       const cache = this._waterBlobCache || { coords: new Array(points) };
@@ -1396,12 +1572,13 @@
       const speed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
       const stretchFactor = Math.min(speed / 100, 0.4);
       const angle = Math.atan2(velocity.y, velocity.x);
+      const nowSeconds = timeSeconds !== null ? timeSeconds : performance.now() / 1000;
 
       // compute coords each frame using precomputed base cos/sin (cheap trig)
       for (let i = 0; i < points; i++) {
         const baseCos = this._blobBaseCos[i];
         const baseSin = this._blobBaseSin[i];
-        const wobble = Math.sin((performance.now() / 1000) * (1.2 + i * 0.08) + i) * 0.08;
+        const wobble = Math.sin(nowSeconds * (1.2 + i * 0.08) + i) * 0.08;
         let r = radius * (1 + wobble);
         const baseAngle = Math.atan2(baseSin, baseCos);
         const angleDiff = baseAngle - angle;
@@ -1441,12 +1618,206 @@
       ctx.fill();
     }
 
+    drawRocks(ctx, time) {
+      const useImage = this.rockImageLoaded && this.rockImage && this.rockImage.complete && this.rockImage.naturalWidth > 0;
+      for (let i = 0; i < this.rockEntities.length; i++) {
+        const entity = this.rockEntities[i];
+        const pos = entity.body.position;
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        const breathScale = 1 + 0.02 * Math.sin(time * 1.2 + entity.body.id);
+        ctx.scale(breathScale, breathScale);
+        if (useImage) {
+          const iw = this.rockImage.naturalWidth;
+          const ih = this.rockImage.naturalHeight;
+          const targetSize = entity.radius * 2;
+          const scale = targetSize / Math.max(iw, ih);
+          ctx.rotate(entity.rotation || 0);
+          ctx.drawImage(this.rockImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+        } else {
+          if (this.rockPattern) {
+            ctx.fillStyle = this.rockPattern;
+          } else {
+            ctx.fillStyle = this._rockTextureColor;
+          }
+          ctx.beginPath();
+          ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    drawLilypads(ctx, time) {
+      const useImage = this.lilypadImageLoaded && this.lilypadImage && this.lilypadImage.complete && this.lilypadImage.naturalWidth > 0;
+      for (let i = 0; i < this.lilypadEntities.length; i++) {
+        const entity = this.lilypadEntities[i];
+        const pos = entity.body.position;
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        const breathScale = 1 + 0.02 * Math.sin(time * 1.2 + entity.body.id);
+        ctx.scale(breathScale, breathScale);
+        ctx.rotate(entity.body.angle || 0);
+        if (useImage) {
+          const iw = this.lilypadImage.naturalWidth;
+          const ih = this.lilypadImage.naturalHeight;
+          const targetSize = entity.radius * 2.2;
+          const scale = targetSize / Math.max(iw, ih);
+          ctx.drawImage(this.lilypadImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+        } else {
+          ctx.fillStyle = '#d3e8c6';
+          ctx.beginPath();
+          ctx.ellipse(0, 0, entity.radius * 1.2, entity.radius * 0.9, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#ddeded';
+          ctx.beginPath();
+          ctx.moveTo(entity.radius * 0.7, 0);
+          ctx.lineTo(entity.radius * 1.2, -5);
+          ctx.lineTo(entity.radius * 1.2, 5);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    drawLeaves(ctx, time) {
+      const useImage = this.leafImageLoaded && this.leafImage && this.leafImage.complete && this.leafImage.naturalWidth > 0;
+      for (let i = 0; i < this.leafEntities.length; i++) {
+        const entity = this.leafEntities[i];
+        const pos = entity.body.position;
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        const breathScale = 1 + 0.015 * Math.sin(time * 1.5 + entity.body.id);
+        ctx.scale(breathScale, breathScale);
+  ctx.rotate(entity.body.angle || 0);
+        if (useImage) {
+          const iw = this.leafImage.naturalWidth;
+          const ih = this.leafImage.naturalHeight;
+          const targetSize = entity.radius * 2.5;
+          const scale = targetSize / Math.max(iw, ih);
+          ctx.drawImage(this.leafImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+        } else {
+          ctx.fillStyle = '#cbecc7';
+          ctx.beginPath();
+          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.8, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    drawFish(ctx, time) {
+      // Draw fish in a stable order based on their Y position so overlapping
+      // sprites don't flicker when small position jitter changes render order.
+      // We create a shallow sorted copy to avoid reordering the simulation list.
+      const sorted = this.fishEntities.slice().sort((a, b) => {
+        const ay = a.body.position.y || 0;
+        const by = b.body.position.y || 0;
+        if (ay === by) return (a.body.id || 0) - (b.body.id || 0);
+        return ay - by;
+      });
+
+      for (let i = 0; i < sorted.length; i++) {
+        const entity = sorted[i];
+        const pos = entity.body.position;
+        // apply any computed visual offset (smoothed per-entity)
+        const vo = entity._visualOffset || { x: 0, y: 0 };
+        ctx.save();
+        ctx.translate(pos.x + (vo.x || 0), pos.y + (vo.y || 0));
+        const breathScale = 1 + 0.02 * Math.sin(time * 1.2 + entity.body.id);
+        ctx.scale(breathScale, breathScale);
+        const facing = entity.facing || 1;
+        if (facing < 0) ctx.scale(-1, 1);
+
+        const targetW = entity.radius * 3.0;
+        const targetH = entity.radius * 1.4;
+
+        ctx.fillStyle = entity.color.fill;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        const texture = this.getFishTexture(entity.patternIndex, entity.color.fill, entity.textureKey);
+        if (texture && texture.width > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
+          ctx.clip();
+          try {
+            ctx.drawImage(texture, -targetW / 2, -targetH / 2, targetW, targetH);
+          } catch (e) {
+            logDevError('Fish texture draw failed', e);
+          }
+          ctx.restore();
+        }
+
+        ctx.fillStyle = entity.color.fill;
+        ctx.beginPath();
+        ctx.moveTo(-entity.radius * 1.5, 0);
+        ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
+        ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+      }
+    }
+
+    // Compute small purely-visual offsets for fish that are extremely close
+    // to other fish. Offsets are smoothed per-entity to avoid popping and do
+    // not affect physics bodies. Call this once per render frame before draw.
+    computeFishVisualOffsets() {
+      // initialize offsets
+      for (let i = 0; i < this.fishEntities.length; i++) {
+        const e = this.fishEntities[i];
+        if (!e._visualOffset) e._visualOffset = { x: 0, y: 0 };
+      }
+
+      // naive O(N^2) for small N (35 fish) is fine; only look for very close neighbors
+      for (let i = 0; i < this.fishEntities.length; i++) {
+        const a = this.fishEntities[i];
+        const ax = a.body.position.x;
+        const ay = a.body.position.y;
+        let ox = 0, oy = 0;
+        let count = 0;
+        for (let j = 0; j < this.fishEntities.length; j++) {
+          if (i === j) continue;
+          const b = this.fishEntities[j];
+          const bx = b.body.position.x;
+          const by = b.body.position.y;
+          const dx = bx - ax;
+          const dy = by - ay;
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+          const effectiveSep = this.FISH_SEPARATION_DISTANCE + ( (Math.sqrt(a.body.velocity.x*a.body.velocity.x + a.body.velocity.y*a.body.velocity.y) < 0.06 && Math.sqrt(b.body.velocity.x*b.body.velocity.x + b.body.velocity.y*b.body.velocity.y) < 0.06) ? this.FISH_MIN_PADDING : 0);
+          if (d < Math.max(1, effectiveSep)) {
+            // push a away vector (smaller magnitude than physics nudge)
+            const push = (effectiveSep - d) / effectiveSep;
+            ox -= (dx / d) * push * 0.7; // scale down to keep subtle
+            oy -= (dy / d) * push * 0.7;
+            count++;
+          }
+        }
+        if (count > 0) {
+          ox /= count;
+          oy /= count;
+        }
+        // Smooth towards the computed offset to avoid sudden jumps
+        const cur = a._visualOffset || { x: 0, y: 0 };
+        const smooth = 0.14; // lower = slower smoothing
+        cur.x = cur.x + (ox - cur.x) * smooth;
+        cur.y = cur.y + (oy - cur.y) * smooth;
+        a._visualOffset = cur;
+      }
+    }
+
     render() {
       const ctx = this.ctx;
       const dpr = this.dpr;
 
       ctx.save();
       ctx.scale(dpr, dpr);
+
+  this.refreshTexturesIfNeeded(ctx);
 
       // If grass is available we will render it in world-space after we apply
       // camera transforms so it moves with the camera. Otherwise, render the
@@ -1472,7 +1843,7 @@
         } catch (e) {
           console.warn('Failed to create outside texture pattern:', e);
         }
-        if (!filled) ctx.fillStyle = '#6B9080';
+  if (!filled) ctx.fillStyle = this._outsideTextureColor;
         ctx.fillRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
       } else {
         // leave the canvas background unfilled here — we'll draw the grass
@@ -1532,134 +1903,25 @@
       ctx.strokeStyle = '#e5e5e5';
       ctx.lineWidth = 3;
       ctx.stroke();
-
-      this.entities.forEach(entity => {
-        const pos = entity.body.position;
-        const time = performance.now() / 1000;
-
-        ctx.save();
-        ctx.translate(pos.x, pos.y);
-
-        const breathScale = 1 + 0.02 * Math.sin(time * 1.2 + entity.body.id);
-        ctx.scale(breathScale, breathScale);
-
-        if (entity.type === 'rock') {
-          // draw rock using rock image if available, otherwise use procedural pattern
-          if (this.rockImageLoaded && this.rockImage && this.rockImage.complete && this.rockImage.naturalWidth > 0) {
-            // draw the rock image centered and scaled to the rock diameter, rotated by entity.rotation
-            const iw = this.rockImage.naturalWidth;
-            const ih = this.rockImage.naturalHeight;
-            const targetSize = entity.radius * 2;
-            const scale = targetSize / Math.max(iw, ih);
-            ctx.save();
-            ctx.rotate(entity.rotation || 0);
-            ctx.drawImage(this.rockImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
-            ctx.restore();
-          } else {
-            // rock pattern fill fallback
-            try {
-              const pattern = ctx.createPattern(this.rockTextureCanvas, 'repeat');
-              if (pattern) ctx.fillStyle = pattern;
-              else ctx.fillStyle = '#424342';
-            } catch (e) {
-              ctx.fillStyle = '#424342';
-            }
-            ctx.beginPath();
-            ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
-            ctx.fill();
-
-            // no shadow for fallback either; keep just the pattern fill
-          }
-        } else if (entity.type === 'lilypad') {
-          // draw lilypad image if available, otherwise fallback to procedural shape
-          ctx.save();
-          ctx.rotate(entity.body.angle || 0);
-          if (this.lilypadImageLoaded && this.lilypadImage && this.lilypadImage.complete && this.lilypadImage.naturalWidth > 0) {
-            const iw = this.lilypadImage.naturalWidth;
-            const ih = this.lilypadImage.naturalHeight;
-            // scale image to roughly match the lilypad radius (use diameter)
-            const targetSize = entity.radius * 2.2;
-            const scale = targetSize / Math.max(iw, ih);
-            ctx.drawImage(this.lilypadImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
-          } else {
-            ctx.fillStyle = '#d3e8c6';
-            ctx.beginPath();
-            ctx.ellipse(0, 0, entity.radius * 1.2, entity.radius * 0.9, 0, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = '#ddeded';
-            ctx.beginPath();
-            ctx.moveTo(entity.radius * 0.7, 0);
-            ctx.lineTo(entity.radius * 1.2, -5);
-            ctx.lineTo(entity.radius * 1.2, 5);
-            ctx.fill();
-          }
-          ctx.restore();
-        } else if (entity.type === 'leaf') {
-          if (this.leafImageLoaded && this.leafImage && this.leafImage.complete && this.leafImage.naturalWidth > 0) {
-            const iw = this.leafImage.naturalWidth;
-            const ih = this.leafImage.naturalHeight;
-            const targetSize = entity.radius * 2.5;
-            const scale = targetSize / Math.max(iw, ih);
-            ctx.rotate(entity.body.angle);
-            ctx.drawImage(this.leafImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
-          } else {
-            ctx.fillStyle = '#cbecc7';
-            ctx.rotate(entity.body.angle);
-            ctx.beginPath();
-            ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.8, 0, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        } else if (entity.type === 'fish') {
-          // Use a stable facing value (1 for right, -1 for left) updated in updateFish
-          const facing = entity.facing || 1;
-          ctx.save();
-          ctx.scale(facing, 1);
-
-          // target size tuned to match previous ellipse silhouette
-          const targetW = entity.radius * 3.0; // fish length
-          const targetH = entity.radius * 1.4; // fish height (ellipse ry = targetH/2 = 0.7*radius)
-
-          // draw the base fill first
-          ctx.fillStyle = entity.color.fill;
-          ctx.beginPath();
-          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
-          ctx.fill();
-
-          if (entity.texture && entity.texture.width > 0) {
-            // draw the pre-tinted pattern texture on top, clipped to the fish silhouette
-            ctx.save();
-            ctx.beginPath();
-            ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
-            ctx.clip();
-            try {
-              ctx.drawImage(entity.texture, -targetW / 2, -targetH / 2, targetW, targetH);
-            } catch (e) {
-              // ignore drawing errors
-            }
-            ctx.restore();
-          }
-
-          // draw tail on top so the silhouette matches the original art
-          ctx.fillStyle = entity.color.fill;
-          ctx.beginPath();
-          ctx.moveTo(-entity.radius * 1.5, 0);
-          ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
-          ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
-          ctx.closePath();
-          ctx.fill();
-
-          ctx.restore();
-        }
-
-        ctx.restore();
-      });
+      const time = performance.now() / 1000;
+      this.drawRocks(ctx, time);
+      this.drawLilypads(ctx, time);
+      this.drawLeaves(ctx, time);
+      // compute purely-visual offsets to avoid physics nudging/vibration
+      try {
+        this.computeFishVisualOffsets();
+      } catch (e) {
+        logDevError('computeFishVisualOffsets failed', e);
+      }
+      this.drawFish(ctx, time);
 
       this.drawWaterBlob(
         ctx,
         this.player.x,
         this.player.y,
         this.player.radius,
-        this.player.body.velocity
+        this.player.body.velocity,
+        time
       );
 
       this.ripples.forEach(r => {
@@ -1678,35 +1940,39 @@
         const progress = w.age / w.life;
         const alpha = 1 - progress;
         const baseRadius = w.maxRadius * progress;
-        // simplified whirlpool: fewer rings and fewer saves/restores
-        const rings = 2;
-        const time = performance.now() / 1000;
+        const outerRadius = baseRadius * 0.75;
+        const innerRadius = outerRadius * 0.6;
+
         ctx.save();
         ctx.translate(w.x, w.y);
-        for (let i = 0; i < rings; i++) {
-          const rProgress = (i + 1) / rings;
-          const radius = baseRadius * rProgress * (0.6 + 0.35 * Math.sin(time * 1.6 + i));
-          const spinAngle = time * w.spin * (0.8 + i * 0.25);
-          ctx.save();
-          ctx.rotate(spinAngle);
-          ctx.strokeStyle = `rgba(110,160,200, ${alpha * (0.6 - i*0.12)})`;
-          ctx.lineWidth = 2.5 * (1 - progress) * (1 + i * 0.3);
+        ctx.rotate(time * w.spin * 0.6);
+
+        ctx.strokeStyle = `rgba(110,160,200, ${alpha * 0.6})`;
+        ctx.lineWidth = 2 * (1 - progress);
+        ctx.beginPath();
+        ctx.arc(0, 0, outerRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(150,190,220, ${alpha * 0.4})`;
+        ctx.lineWidth = 1.4 * (1 - progress);
+        ctx.beginPath();
+        ctx.arc(0, 0, innerRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.rotate(time * w.spin * 0.3);
+        ctx.strokeStyle = `rgba(200,230,245, ${alpha * 0.45})`;
+        ctx.lineWidth = 1;
+        const spokeLength = baseRadius * 0.45;
+        for (let i = 0; i < 3; i++) {
+          const angle = (i / 3) * Math.PI * 2;
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
           ctx.beginPath();
-          ctx.arc(0, 0, radius, Math.PI * 0.2, Math.PI * 1.8);
-          ctx.stroke();
-          ctx.restore();
-        }
-        // simple decorative lines
-        ctx.rotate(time * w.spin * 1.4);
-        ctx.strokeStyle = `rgba(200,230,245, ${alpha * 0.6})`;
-        ctx.lineWidth = 1.2;
-        for (let a = 0; a < 4; a++) {
-          const angle = a * Math.PI * 0.5;
-          ctx.beginPath();
-          ctx.moveTo(Math.cos(angle) * baseRadius * 0.18, Math.sin(angle) * baseRadius * 0.18);
-          ctx.quadraticCurveTo(0, 0, Math.cos(angle + 0.6) * baseRadius * 0.45, Math.sin(angle + 0.6) * baseRadius * 0.45);
+          ctx.moveTo(cos * innerRadius * 0.5, sin * innerRadius * 0.5);
+          ctx.lineTo(cos * spokeLength, sin * spokeLength);
           ctx.stroke();
         }
+
         ctx.restore();
       });
 
@@ -1728,9 +1994,6 @@
 
       // render with the partial dt (no physics update here)
       this.render();
-
-      // increment frame counter used for throttling neighbor checks
-      this._frameCount++;
 
       requestAnimationFrame(() => this.loop());
     }
