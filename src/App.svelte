@@ -26,6 +26,53 @@
 
   function setWin(v) {
     showWin = v;
+    // when showing the win overlay, play the descending arpeggio again
+    if (v) {
+      try {
+        playDescendingArpeggio(900, game && game.audioManager ? game.audioManager : null);
+      } catch (e) {
+        logDevError('Failed to play post-win arpeggio', e);
+      }
+    }
+  }
+
+  // Play a descending arpeggio across the audio manager's scale.
+  // duration: total milliseconds across which notes play. audioMgr optional.
+  function playDescendingArpeggio(duration = 1000, audioMgr = null) {
+    try {
+      const am = audioMgr || (game && game.audioManager) || null;
+      if (!am || !Array.isArray(am.scale) || am.muted) return;
+      const notes = am.scale.length || 0;
+      if (notes <= 0) return;
+      const spacing = Math.max(20, duration / notes);
+      for (let i = 0; i < notes; i++) {
+        const idx = notes - 1 - i;
+        setTimeout(() => {
+          try { am.playXylophoneNote(idx); } catch (e) { logDevError('playXylophoneNote failed', e); }
+        }, i * spacing);
+      }
+    } catch (e) {
+      logDevError('playDescendingArpeggio failed', e);
+    }
+  }
+
+  // Play an ascending arpeggio across the audio manager's scale.
+  function playAscendingArpeggio(duration = 1000, audioMgr = null) {
+    try {
+      const am = audioMgr || (game && game.audioManager) || null;
+      if (!am || !Array.isArray(am.scale) || am.muted) return;
+      const notes = am.scale.length || 0;
+      if (notes <= 0) return;
+      const spacing = Math.max(20, duration / notes);
+      for (let i = 0; i < notes; i++) {
+        const idx = i;
+        setTimeout(() => {
+          try { am.playXylophoneNote(idx); } catch (e) { logDevError('playXylophoneNote failed', e); }
+        }, i * spacing);
+      }
+    } catch (e) {
+      logDevError('playAscendingArpeggio failed', e);
+    }
   }
 
   function playAgain() {
@@ -45,6 +92,8 @@
 
       // animate camera zoom into gameplay over 2s, then unpause and play a note
       try {
+        // play ascending arpeggio during the zoom-in
+        try { playAscendingArpeggio(2000, game.audioManager); } catch (e) { logDevError('Failed to schedule start arpeggio', e); }
         await game.zoomToGameplay(2000);
       } catch (e) {
         // if animation fails, continue to unpause
@@ -409,6 +458,10 @@
   // fixed physics timestep (ms) and accumulator to reduce physics CPU
   this._physicsStepMs = 1000 / 30; // 30 Hz physics
   this._physicsAccumulator = 0;
+    // win guard to avoid retriggering the win animation
+    this._winTriggered = false;
+  // if true, update() will not auto-follow the player camera; used during win zoom
+  this._suspendCameraFollow = false;
   // debug flag: set to true to log large separation forces / overlaps
   this.DEBUG_FISH_SEPARATION = false;
 
@@ -1223,6 +1276,44 @@
       });
     }
 
+    // Animate camera zoom to the world-fit zoom (shows the whole world). Returns a promise.
+    zoomToWorld(duration = 2000) {
+      // suspend the player camera-follow while animating to avoid update loop jitter
+      this._suspendCameraFollow = true;
+      return new Promise((resolve) => {
+        const startZoom = this.camera.zoom || 1;
+        const endZoom = this.worldFitZoom || 1;
+        const startX = this.camera.x || 0;
+        const startY = this.camera.y || 0;
+        const endX = this.worldCenter.x || 0;
+        const endY = this.worldCenter.y || 0;
+        const startTime = performance.now();
+
+        const ease = (t) => 1 - Math.pow(1 - t, 3); // easeOutCubic
+
+        // schedule a descending arpeggio across the scale during the zoom
+        try { playDescendingArpeggio(duration, this.audioManager); } catch (e) { logDevError('Failed to schedule arpeggio', e); }
+
+        const step = () => {
+          const now = performance.now();
+          const elapsed = now - startTime;
+          const t = Math.min(1, elapsed / duration);
+          const e = ease(t);
+          this.camera.zoom = startZoom + (endZoom - startZoom) * e;
+          this.camera.x = startX + (endX - startX) * e;
+          this.camera.y = startY + (endY - startY) * e;
+
+          if (t < 1) requestAnimationFrame(step);
+          else {
+            this._suspendCameraFollow = false;
+            resolve();
+          }
+        };
+
+        requestAnimationFrame(step);
+      });
+    }
+
     createRipple(x, y) {
       const maxRadius = 220 + Math.random() * 60;
       this.ripples.push({ x, y, age: 0, life: 900, maxRadius });
@@ -1335,10 +1426,25 @@
         const total = this.lilypadEntities.length || 0;
         if (total > 0) {
           const transformed = this.lilypadEntities.filter(e => e.transformed).length;
-          if (transformed === total) {
-            // trigger win state (visual only)
-            setWin(true);
-            this.paused = true;
+          if (transformed === total && !this._winTriggered) {
+            this._winTriggered = true;
+            // animate camera out to show whole world, then pause and show win UI
+            try {
+              this.zoomToWorld(1400).then(() => {
+                this.paused = true;
+                setWin(true);
+              }).catch((err) => {
+                // if animation fails, still pause and show win
+                logDevError('zoomToWorld failed', err);
+                this._suspendCameraFollow = false;
+                this.paused = true;
+                setWin(true);
+              });
+            } catch (err) {
+              logDevError('Win zoom trigger failed', err);
+              this.paused = true;
+              setWin(true);
+            }
           }
         }
       } catch (e) {
@@ -1387,8 +1493,10 @@
 
       const targetCameraX = this.player.x;
       const targetCameraY = this.player.y;
-      this.camera.x += (targetCameraX - this.camera.x) * 0.12;
-      this.camera.y += (targetCameraY - this.camera.y) * 0.12;
+      if (!this._suspendCameraFollow) {
+        this.camera.x += (targetCameraX - this.camera.x) * 0.12;
+        this.camera.y += (targetCameraY - this.camera.y) * 0.12;
+      }
     }
 
   updateFish(entity, dt, neighborCheck = true) {
@@ -2231,7 +2339,7 @@
   <div id="splashOverlay">
     <div id="splashCard">
       <h1>Congratulations!</h1>
-      <p> Oh Littledrop 💧<br>The pond is blooming 🌸🌺🌼</p>
+      <p> Thank you, Littledrop 💧<br>🍂🍂🍂<br>The pond is blooming ✨<br>🌸🌺🌼</p>
   <button id="playAgainBtn" on:click={() => playAgain()}>Play Again</button>
     </div>
   </div>
