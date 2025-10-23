@@ -240,6 +240,10 @@
   this.LEAF_REPEL_DISTANCE = 36; // radius within which repel applies
       this.PLAYER_MOVE_FORCE = 0.0015;
 
+  // Threshold for considering horizontal velocity significant enough to flip fish
+  // Prevents rapid left/right flipping when vx hovers near zero.
+  this.FISH_FACING_THRESHOLD = 0.03;
+
   this.camera = { x: 1000, y: 1000, zoom: 1 };
       this.player = {
         x: 1000,
@@ -265,6 +269,8 @@
 
       this.lastTime = performance.now();
       this.rippleTimer = 0;
+  // debug flag: set to true to log large separation forces / overlaps
+  this.DEBUG_FISH_SEPARATION = false;
 
       // offscreen watercolor canvas for the world interior
       this.watercolorCanvas = document.createElement('canvas');
@@ -565,37 +571,66 @@
       ctx.globalAlpha = 1;
     }
 
-    // generate a small offscreen texture for fish using the fish colors
-    generateFishTexture(canvas, fill = '#ff9966', stroke = '#ff7744') {
+    // generate a small offscreen texture for fish that contains ONLY the
+    // pattern (transparent background). The base fill will be drawn when
+    // rendering each fish so patterns can be mixed with any colour.
+    generateFishTexture(canvas, /*fill*/ _fill = null, stroke = '#000000') {
       const ctx = canvas.getContext('2d');
       const w = canvas.width;
       const h = canvas.height;
+      // keep the canvas transparent
       ctx.clearRect(0, 0, w, h);
 
-      // background base
-      ctx.fillStyle = fill;
-      ctx.fillRect(0, 0, w, h);
-
-      // pick pattern: stripes or dots
-      const pattern = Math.random() > 0.5 ? 'stripes' : 'dots';
+      // pick pattern: curved stripes, horizontal stripes, vertical stripes, or dots
+      const patterns = ['stripes', 'hstripes', 'vstripes', 'dots'];
+      const pattern = patterns[Math.floor(Math.random() * patterns.length)];
 
       if (pattern === 'stripes') {
+        // thinner stripes, less fill coverage
         const stripeCount = 3 + Math.floor(Math.random() * 3);
         for (let i = 0; i < stripeCount; i++) {
-          ctx.fillStyle = shadeColor(stroke, -10 + Math.random() * 20);
-          const y = (i / stripeCount) * h - h * 0.15 + (Math.random() - 0.5) * h * 0.08;
+          ctx.fillStyle = shadeColor(stroke, -8 + Math.random() * 14);
+          // reduce stripe height and add stronger horizontal jitter
+          const y = (i / stripeCount) * h - h * 0.12 + (Math.random() - 0.5) * h * 0.14;
+          const stripeW = w * (0.45 + Math.random() * 0.2);
+          const stripeH = h * (0.12 + Math.random() * 0.08);
           ctx.beginPath();
-          ctx.ellipse(w/2, y + h*0.12, w*0.6, h*0.25, Math.PI * (Math.random() * 0.15 - 0.075), 0, Math.PI * 2);
+          ctx.ellipse(w/2 + (Math.random() - 0.5) * w * 0.04, y + h*0.12, stripeW, stripeH, Math.PI * (Math.random() * 0.12 - 0.06), 0, Math.PI * 2);
           ctx.fill();
         }
+      } else if (pattern === 'hstripes') {
+        // thin horizontal stripes
+        const stripeCount = 3 + Math.floor(Math.random() * 4);
+        for (let i = 0; i < stripeCount; i++) {
+          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
+          const y = (i + 0.5) / stripeCount * h + (Math.random() - 0.5) * h * 0.06;
+          const stripeH = h * (0.07 + Math.random() * 0.04);
+          ctx.beginPath();
+          ctx.ellipse(w/2, y, w * 0.5, stripeH, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (pattern === 'vstripes') {
+        // thin vertical stripes
+        const stripeCount = 3 + Math.floor(Math.random() * 4);
+        for (let i = 0; i < stripeCount; i++) {
+          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
+          const x = (i + 0.5) / stripeCount * w + (Math.random() - 0.5) * w * 0.06;
+          const stripeW = w * (0.07 + Math.random() * 0.04);
+          ctx.save();
+          ctx.translate(x, h/2);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, stripeW, h * 0.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
       } else {
-        // dots
-        const dotCount = 6 + Math.floor(Math.random() * 8);
+        // dots: smaller, more sparse
+        const dotCount = 4 + Math.floor(Math.random() * 6);
         for (let i = 0; i < dotCount; i++) {
           ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
           const dx = Math.random() * w;
           const dy = Math.random() * h;
-          const r = Math.max(2, Math.random() * (w * 0.12));
+          const r = Math.max(1.5, Math.random() * (w * 0.08));
           ctx.beginPath();
           ctx.arc(dx, dy, r, 0, Math.PI * 2);
           ctx.fill();
@@ -645,7 +680,7 @@
         this.entities.push({ type: 'lilypad', body, radius, angle });
       }
 
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 40; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -658,10 +693,21 @@
           label: 'leaf'
         });
         World.add(this.engine.world, body);
+        // give each leaf a tiny unique drift variation so they don't all move identically
+        const driftFactor = 0.8 + Math.random() * 0.4; // 0.8..1.2 multiplier
+        const driftPhase = Math.random() * Math.PI * 2;
+        const driftFreq = 0.6 + Math.random() * 1.2; // slow per-leaf oscillation
+        const driftAmp = 0.02 + Math.random() * 0.06; // small amplitude modifier
+
         this.entities.push({
           type: 'leaf',
           body,
-          radius
+          radius,
+          // per-leaf drift modifiers applied on top of sharedLeafDrift
+          driftFactor,
+          driftPhase,
+          driftFreq,
+          driftAmp
         });
       }
 
@@ -672,21 +718,23 @@
         { fill: '#cc99ff', stroke: '#aa77ff' },
         { fill: '#ff6699', stroke: '#ff4477' },
         { fill: '#1cd9ad', stroke: '#1cbba3' },
-        { fill: '#000000', stroke: '#000000' }
+        { fill: '#474242', stroke: '#474242' }
       ];
 
-      // Pre-generate a small pool of fish textures using the actual palette so colors/tails match.
-      const poolSize = 8;
+      // Pre-generate a small pool of PATTERN textures. These textures contain
+      // only the pattern drawn on a transparent background so they can be
+      // combined with any fish colour at render time for greater variation.
+      const poolSize = 12;
       const texRadius = 16; // base radius used later for fish sizing
       const texSize = Math.ceil(texRadius * 3);
       this.fishTexturePool = this.fishTexturePool || [];
       if (this.fishTexturePool.length === 0) {
         for (let p = 0; p < poolSize; p++) {
-          const color = fishColors[p % fishColors.length];
           const canvas = document.createElement('canvas');
           canvas.width = texSize;
           canvas.height = texSize;
-          this.generateFishTexture(canvas, color.fill, color.stroke);
+          // use a mid-gray stroke for patterns (so multiply doesn't produce pure black)
+          this.generateFishTexture(canvas, null, '#444444');
           this.fishTexturePool.push(canvas);
         }
       }
@@ -703,13 +751,39 @@
           label: 'fish'
         });
         World.add(this.engine.world, body);
+        // Prevent fish bodies from rotating due to collisions or forces.
+        // Allow them to translate but keep a stable orientation so visual
+        // schooling/facing logic (which reads velocities) remains smooth.
+        try {
+          // set inertia to Infinity to lock rotation
+          Matter.Body.setInertia(body, Infinity);
+          // ensure no residual angular velocity
+          Matter.Body.setAngularVelocity(body, 0);
+        } catch (e) {
+          // Some Matter builds may not support these helpers; fall back to
+          // setting the properties directly (best-effort).
+          try { body.inertia = Infinity; body.angularVelocity = 0; } catch (e2) { /* ignore */ }
+        }
         const color = fishColors[i % fishColors.length];
   // reuse a pre-generated texture from the pool to save CPU at startup
-  // choose pool texture aligned to the fish color so body texture hue matches the tail
-  const colorIndex = i % fishColors.length;
-  const poolTex = this.fishTexturePool[colorIndex % this.fishTexturePool.length];
-  // Reuse the pool canvas directly as a read-only texture.
-  const tex = poolTex;
+  // pick a random pattern texture for each fish so pattern is independent of colour
+  const poolTex = this.fishTexturePool[Math.floor(Math.random() * this.fishTexturePool.length)];
+  // Create a per-fish tinted pattern canvas so the pattern matches the
+  // fish's colour (slightly darker). This is done once at setup time for
+  // performance rather than recolouring per-frame.
+  const tex = document.createElement('canvas');
+  tex.width = texSize;
+  tex.height = texSize;
+  const tctx = tex.getContext('2d');
+  // draw the pattern into the temp canvas
+  tctx.clearRect(0, 0, texSize, texSize);
+  tctx.drawImage(poolTex, 0, 0, texSize, texSize);
+  // tint the pattern to a slightly darker shade of the fill color
+  const tint = shadeColor(color.fill || '#000000', -14);
+  tctx.globalCompositeOperation = 'source-in';
+  tctx.fillStyle = tint;
+  tctx.fillRect(0, 0, texSize, texSize);
+  tctx.globalCompositeOperation = 'source-over';
 
         this.entities.push({
           type: 'fish',
@@ -728,6 +802,8 @@
           color,
           texture: tex
           ,
+          // stable facing: 1 => right, -1 => left. We'll only flip when vx magnitude is significant.
+          facing: 1,
           // goal-directed wandering: null when not heading to a specific target
           goal: null,
           goalTimeout: 0,
@@ -737,6 +813,7 @@
           idleTimer: 300 + Math.random() * 800
         });
       }
+
     }
 
     setupInput() {
@@ -1082,10 +1159,37 @@
             neighborCount++;
           }
 
+          // Separation: push fish away from very close neighbors.
+          // Use a distance-scaled force and clamp the magnitude to avoid
+          // producing very large instantaneous impulses (Edge timing/FP
+          // differences could make the original constant force cause
+          // fish to teleport/swap positions when bodies overlap).
           if (odist < this.FISH_SEPARATION_DISTANCE && odist > 0) {
+            // fraction of how deep inside the separation threshold we are (0..1)
+            const overlapFrac = Math.max(0, (this.FISH_SEPARATION_DISTANCE - odist) / this.FISH_SEPARATION_DISTANCE);
+
+            // base force scaled by overlap; small minimum so we always nudge
+            const base = this.FISH_SEPARATION_FORCE * (0.35 + 0.65 * overlapFrac);
+
+            // clamp to a reasonable maximum to avoid excessive impulses
+            const maxForce = this.FISH_SEPARATION_FORCE * 3.0;
+            const forceMag = Math.min(base, maxForce);
+
+            // safe normalization (avoid dividing by extremely small numbers)
+            const inv = 1 / Math.max(odist, 0.5);
+            const nx = -odx * inv;
+            const ny = -ody * inv;
+
+            if (this.DEBUG_FISH_SEPARATION) {
+              const recordedMag = Math.sqrt((nx * forceMag) ** 2 + (ny * forceMag) ** 2);
+              if (recordedMag > this.FISH_SEPARATION_FORCE * 0.9) {
+                console.debug('Fish separation impulse', { a: entity.body.id, b: other.body.id, odist, forceMag, recordedMag });
+              }
+            }
+
             Matter.Body.applyForce(entity.body, entity.body.position, {
-              x: -odx / odist * this.FISH_SEPARATION_FORCE,
-              y: -ody / odist * this.FISH_SEPARATION_FORCE
+              x: nx * forceMag,
+              y: ny * forceMag
             });
           }
         });
@@ -1172,13 +1276,31 @@
       } else {
         entity.fleeTimer -= dt;
       }
+
+      // Update facing based on horizontal velocity but only when vx magnitude is
+      // above a small threshold to prevent rapid flipping when nearly stationary.
+      try {
+        const vx = entity.body.velocity.x;
+        if (Math.abs(vx) > this.FISH_FACING_THRESHOLD) {
+          entity.facing = vx >= 0 ? 1 : -1;
+        }
+      } catch (e) {
+        // ignore if body not ready
+      }
     }
 
     updateLeaf(entity, dt) {
-      // apply shared gust vector to all leaves
+      // apply shared gust vector to leaves with a tiny per-leaf variation so
+      // they don't all move at exactly the same velocity. This adds a slow
+      // oscillation and a per-leaf multiplier.
+      const t = performance.now() / 1000;
+      const phase = (entity.driftPhase || 0) + t * (entity.driftFreq || 1);
+      const osc = 1 + Math.sin(phase) * (entity.driftAmp || 0);
+      const factor = (entity.driftFactor || 1) * osc;
+
       Matter.Body.applyForce(entity.body, entity.body.position, {
-        x: this.sharedLeafDrift.vx * this.LEAF_DRIFT_FORCE,
-        y: this.sharedLeafDrift.vy * this.LEAF_DRIFT_FORCE
+        x: this.sharedLeafDrift.vx * this.LEAF_DRIFT_FORCE * factor,
+        y: this.sharedLeafDrift.vy * this.LEAF_DRIFT_FORCE * factor
       });
     }
 
@@ -1405,32 +1527,33 @@
             ctx.fill();
           }
         } else if (entity.type === 'fish') {
-          const vx = entity.body.velocity.x;
-          const flipX = vx < 0 ? -1 : 1;
+          // Use a stable facing value (1 for right, -1 for left) updated in updateFish
+          const facing = entity.facing || 1;
           ctx.save();
-          ctx.scale(flipX, 1);
+          ctx.scale(facing, 1);
 
           // target size tuned to match previous ellipse silhouette
           const targetW = entity.radius * 3.0; // fish length
           const targetH = entity.radius * 1.4; // fish height (ellipse ry = targetH/2 = 0.7*radius)
 
+          // draw the base fill first
+          ctx.fillStyle = entity.color.fill;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+
           if (entity.texture && entity.texture.width > 0) {
-            // clip to an ellipse so texture appears in fish silhouette
-            ctx.save(); // save before clipping so we can draw the tail outside the clip
+            // draw the pre-tinted pattern texture on top, clipped to the fish silhouette
+            ctx.save();
             ctx.beginPath();
             ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
             ctx.clip();
-
-            // draw the texture centered and scaled to target size
-            ctx.drawImage(entity.texture, -targetW / 2, -targetH / 2, targetW, targetH);
-
-            ctx.restore(); // remove clip so tail can be drawn unmasked
-          } else {
-            // fallback: draw the plain fish shape
-            ctx.fillStyle = entity.color.fill;
-            ctx.beginPath();
-            ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
-            ctx.fill();
+            try {
+              ctx.drawImage(entity.texture, -targetW / 2, -targetH / 2, targetW, targetH);
+            } catch (e) {
+              // ignore drawing errors
+            }
+            ctx.restore();
           }
 
           // draw tail on top so the silhouette matches the original art
