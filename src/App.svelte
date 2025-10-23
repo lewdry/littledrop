@@ -22,6 +22,16 @@
   // app-level state for splash/start
   let game = null;
   let showSplash = true;
+  let showWin = false;
+
+  function setWin(v) {
+    showWin = v;
+  }
+
+  function playAgain() {
+    // simple reset: reload page to recreate game state
+    try { window.location.reload(); } catch (e) { /* fallback */ }
+  }
 
   async function startGame() {
     showSplash = false;
@@ -80,6 +90,9 @@
       this._maxUnlockAttempts = 3;
       this._unlockBlocked = false;
       this._unlockInFlight = false;
+      // collision sound debounce
+      this._lastCollisionTime = 0;
+      this._collisionCooldownMs = 180; // milliseconds
     }
 
     init() {
@@ -284,6 +297,16 @@
     }
 
     async playCollisionSound() {
+      // debounce rapid collision sounds (e.g., when player is resting against a rock)
+      try {
+        const now = performance.now();
+        if (now - (this._lastCollisionTime || 0) < this._collisionCooldownMs) {
+          return;
+        }
+        this._lastCollisionTime = now;
+      } catch (e) {
+        // performance may not be available in some test envs; silently continue
+      }
       if (this.muted) return;
       const resumed = await this.resume();
       if (!resumed || !this.ctx || this.ctx.state !== 'running') return;
@@ -446,7 +469,34 @@
   this.lilypadImageLoaded = false;
   this.lilypadImage.onload = () => { this.lilypadImageLoaded = true; };
   this.lilypadImage.onerror = () => { this.lilypadImageLoaded = false; };
-  this.lilypadImage.src = _base.replace(/\/$/, '') + '/assets/lilypad.png';
+      // legacy single image (used if variants not available)
+      this.lilypadImage.src = _base.replace(/\/$/, '') + '/assets/lilypad.png';
+
+      // load lilypad variants
+      this.lilypadVariants = [];
+      this.lilypadVariantImages = [];
+      ['lilypad1.png', 'lilypad2.png'].forEach((f, idx) => {
+        const img = new Image();
+        img.onload = () => { this.lilypadVariantImages[idx] = img; };
+        img.onerror = () => { this.lilypadVariantImages[idx] = null; };
+        img.src = _base.replace(/\/$/, '') + '/assets/' + f;
+        this.lilypadVariants.push(f);
+      });
+
+      // load bloom variants mapping
+      this.bloomVariants = {
+        0: ['bloom1.png','bloom3.png','bloom5.png'], // maps from lilypad1
+        1: ['bloom2.png','bloom4.png','bloom6.png']  // maps from lilypad2
+      };
+      this.bloomImages = {};
+      Object.keys(this.bloomVariants).forEach(k => {
+        this.bloomVariants[k].forEach((f) => {
+          const img = new Image();
+          img.onload = () => { this.bloomImages[f] = img; };
+          img.onerror = () => { this.bloomImages[f] = null; };
+          img.src = _base.replace(/\/$/, '') + '/assets/' + f;
+        });
+      });
 
     // grass tile image for outside area (preferred repeatable background)
     this.grassImage = new Image();
@@ -913,7 +963,9 @@
           angle: angle
         });
         World.add(this.engine.world, body);
-        const ent = { type: 'lilypad', body, radius, angle };
+        // choose a random variant index (0 or 1) and store current visual state
+        const variantIndex = Math.random() < 0.5 ? 0 : 1;
+        const ent = { type: 'lilypad', body, radius, angle, variantIndex, transformed: false, currentBloom: null };
         this.entities.push(ent);
         this.lilypadEntities.push(ent);
       }
@@ -1249,6 +1301,25 @@
               x: ny * tangential,
               y: -nx * tangential
             });
+            // If the entity is a lilypad and within a tighter inner radius, visually transform it
+            try {
+              if (entity.type === 'lilypad' && !entity.transformed) {
+                const dist = Math.sqrt(dist2) || 0.0001;
+                // transform when inside ~60% of whirlpool max radius and while whirlpool is active
+                if (dist < w.maxRadius * 0.6 && progress < 0.9) {
+                  entity.transformed = true;
+                  // select bloom image based on variant mapping
+                  const v = entity.variantIndex || 0;
+                  const choices = this.bloomVariants[v] || [];
+                  if (choices.length > 0) {
+                    const pick = choices[Math.floor(Math.random() * choices.length)];
+                    entity.currentBloom = this.bloomImages[pick] || null;
+                  }
+                }
+              }
+            } catch (e) {
+              logDevError('Lilypad transform failed', e);
+            }
           }
         };
 
@@ -1258,6 +1329,21 @@
 
         return w.age < w.life;
       });
+
+      // Check win condition: all lilypads transformed into blooms
+      try {
+        const total = this.lilypadEntities.length || 0;
+        if (total > 0) {
+          const transformed = this.lilypadEntities.filter(e => e.transformed).length;
+          if (transformed === total) {
+            // trigger win state (visual only)
+            setWin(true);
+            this.paused = true;
+          }
+        }
+      } catch (e) {
+        logDevError('Win check failed', e);
+      }
 
       // Build spatial hash for neighbor queries (near-linear neighbor lookup)
       this._cellSize = this.FISH_NEIGHBOR_DISTANCE || 140;
@@ -1649,7 +1735,7 @@
     }
 
     drawLilypads(ctx, time) {
-      const useImage = this.lilypadImageLoaded && this.lilypadImage && this.lilypadImage.complete && this.lilypadImage.naturalWidth > 0;
+      const useImage = (this.lilypadVariantImages && this.lilypadVariantImages.length > 0) || (this.lilypadImageLoaded && this.lilypadImage && this.lilypadImage.complete && this.lilypadImage.naturalWidth > 0);
       for (let i = 0; i < this.lilypadEntities.length; i++) {
         const entity = this.lilypadEntities[i];
         const pos = entity.body.position;
@@ -1659,11 +1745,27 @@
         ctx.scale(breathScale, breathScale);
         ctx.rotate(entity.body.angle || 0);
         if (useImage) {
-          const iw = this.lilypadImage.naturalWidth;
-          const ih = this.lilypadImage.naturalHeight;
-          const targetSize = entity.radius * 2.2;
-          const scale = targetSize / Math.max(iw, ih);
-          ctx.drawImage(this.lilypadImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+          // choose bloom if transformed, otherwise choose lilypad variant (fall back to legacy image)
+          if (entity.transformed && entity.currentBloom) {
+            const img = entity.currentBloom;
+            const iw = img.naturalWidth || img.width || 1;
+            const ih = img.naturalHeight || img.height || 1;
+            const targetSize = entity.radius * 2.4;
+            const scale = targetSize / Math.max(iw, ih);
+            try { ctx.drawImage(img, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale); } catch (e) { /* ignore */ }
+          } else {
+            // draw chosen variant image if available
+            const variantIndex = (typeof entity.variantIndex === 'number') ? entity.variantIndex : 0;
+            const variantImg = (this.lilypadVariantImages && this.lilypadVariantImages[variantIndex]) || null;
+            const img = variantImg || this.lilypadImage;
+            if (img && img.naturalWidth) {
+              const iw = img.naturalWidth;
+              const ih = img.naturalHeight;
+              const targetSize = entity.radius * 2.2;
+              const scale = targetSize / Math.max(iw, ih);
+              try { ctx.drawImage(img, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale); } catch (e) { /* ignore */ }
+            }
+          }
         } else {
           ctx.fillStyle = '#d3e8c6';
           ctx.beginPath();
@@ -2096,6 +2198,19 @@
   }
 
   #startBtn:active { transform: scale(0.98); }
+
+  /* Give Play Again the same styling as Start */
+  #playAgainBtn {
+    background: #2d9cdb;
+    color: white;
+    border: none;
+    padding: 12px 22px;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  #playAgainBtn:active { transform: scale(0.98); }
 </style>
 
 <canvas id="gameCanvas"></canvas>
@@ -2108,6 +2223,16 @@
       <h1>Littledrop</h1>
       <p>You are Littledrop 💧<br>Tap anywhere to move 🌀<br>Double-tap to splash 🌊<br>Sound on 🔊</p>
       <button id="startBtn" on:click={() => startGame()}>Start</button>
+    </div>
+  </div>
+{/if}
+
+{#if showWin}
+  <div id="splashOverlay">
+    <div id="splashCard">
+      <h1>Congratulations!</h1>
+      <p> Oh Littledrop 💧<br>The pond is blooming 🌸🌺🌼</p>
+  <button id="playAgainBtn" on:click={() => playAgain()}>Play Again</button>
     </div>
   </div>
 {/if}
