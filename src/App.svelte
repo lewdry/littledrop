@@ -2384,8 +2384,27 @@
   }
 
   onMount(() => {
+    // HMR/dev safety: if a previous game instance exists on the window (from
+    // a prior module replacement), try to destroy it first. This prevents
+    // duplicate requestAnimationFrame loops and other duplicated resources
+    // which can cause intermittent jitter during development.
+    try {
+      if (typeof window !== 'undefined') {
+        const prev = window.__LITTLEDROP_GAME__;
+        if (prev && typeof prev.destroy === 'function' && !prev._destroyed) {
+          try { prev.destroy(); } catch (e) { logDevError('Previous game.destroy() failed', e); }
+        }
+        // clear the global slot to avoid accidentally reusing a destroyed instance
+        window.__LITTLEDROP_GAME__ = null;
+      }
+    } catch (e) {
+      logDevError('Global pre-mount guard failed', e);
+    }
+
     // create the game and pause it until the user presses Start
     game = new LittledropGame();
+    // expose the instance globally so HMR / dev tooling can find and clean it up
+    try { if (typeof window !== 'undefined') window.__LITTLEDROP_GAME__ = game; } catch (e) {}
     game.paused = true;
   });
 
@@ -2396,6 +2415,15 @@
       } catch (e) {
         logDevError('Game destroy failed', e);
       }
+    }
+    // clear any global reference if it points to this instance so a subsequent
+    // hot-reload doesn't reuse a destroyed object
+    try {
+      if (typeof window !== 'undefined' && window.__LITTLEDROP_GAME__ === game) {
+        window.__LITTLEDROP_GAME__ = null;
+      }
+    } catch (e) {
+      /* ignore */
     }
     game = null;
   });
