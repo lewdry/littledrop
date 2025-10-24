@@ -7,8 +7,8 @@
   </head>
   <body>
     <div id="app"></div>
-    <!-- Load Matter.js from CDN so the global `Matter` is available to the app -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <!-- Matter.js is now installed via npm and bundled by Vite; remove CDN usage -->
+  <!-- If you need a global during quick debugging you can expose it in code, but prefer importing from 'matter-js' -->
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

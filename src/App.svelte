@@ -1,5 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  // Import Matter from the npm package so Vite can bundle it (replaces the old CDN global)
+  import * as Matter from 'matter-js';
 
   let _isLocalDev = null;
   function isLocalDevHost() {
