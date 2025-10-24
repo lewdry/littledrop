@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
 
   let _isLocalDev = null;
   function isLocalDevHost() {
@@ -390,6 +390,10 @@
       this.canvas = document.getElementById('gameCanvas');
       this.ctx = this.canvas.getContext('2d');
       this.dpr = window.devicePixelRatio || 1;
+      this._cleanupFns = [];
+      this._destroyed = false;
+      this.loop = this.loop.bind(this);
+      this._rafId = null;
 
       // World is now a circle: 2000px diameter, radius 1000, centered at (1000,1000)
       this.worldDiameter = 2000;
@@ -453,7 +457,9 @@
       for (let i = 0; i < this._blobPoints; i++) _coordsInit[i] = { x: 0, y: 0 };
       this._waterBlobCache = { lastT: 0, coords: _coordsInit };
 
-      this.lastTime = performance.now();
+  const _now = performance.now();
+  this.lastTime = _now;
+  this._frameTimeSeconds = _now / 1000;
       this.rippleTimer = 0;
   // fixed physics timestep (ms) and accumulator to reduce physics CPU
   this._physicsStepMs = 1000 / 30; // 30 Hz physics
@@ -492,6 +498,7 @@
   this.leafEntities = [];
   this.rockEntities = [];
   this.lilypadEntities = [];
+  this._fishDrawOrder = [];
 
   // cached canvas patterns (created on resize/setup)
   this.outsidePattern = null;
@@ -499,7 +506,8 @@
   this.grassPattern = null;
 
   // simple spatial hash used for neighbor queries (built each update)
-  this._spatialHash = null;
+  this._spatialHash = Object.create(null);
+  this._spatialHashKeyList = [];
   this._cellSize = null;
 
       // leaf image
@@ -509,6 +517,16 @@
       this.leafImage.onerror = () => { this.leafImageLoaded = false; };
       const _base = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL) ? import.meta.env.BASE_URL : '/';
       this.leafImage.src = _base.replace(/\/$/, '') + '/assets/leaf.png';
+
+      // load leaf variants (leaf.png, leaf2.png, leaf3.png) to allow visual variety
+      this.leafVariants = ['leaf.png', 'leaf2.png', 'leaf3.png'];
+      this.leafVariantImages = [];
+      this.leafVariants.forEach((f, idx) => {
+        const img = new Image();
+        img.onload = () => { this.leafVariantImages[idx] = img; };
+        img.onerror = () => { this.leafVariantImages[idx] = null; };
+        img.src = _base.replace(/\/$/, '') + '/assets/' + f;
+      });
 
   // rock image (prefer PNG over procedural texture)
   this.rockImage = new Image();
@@ -522,8 +540,8 @@
   this.lilypadImageLoaded = false;
   this.lilypadImage.onload = () => { this.lilypadImageLoaded = true; };
   this.lilypadImage.onerror = () => { this.lilypadImageLoaded = false; };
-      // legacy single image (used if variants not available)
-      this.lilypadImage.src = _base.replace(/\/$/, '') + '/assets/lilypad.png';
+  // legacy single image (point to first variant so code never references missing lilypad.png)
+  this.lilypadImage.src = _base.replace(/\/$/, '') + '/assets/lilypad1.png';
 
       // load lilypad variants
       this.lilypadVariants = [];
@@ -566,7 +584,20 @@
     this.grassImage.onerror = () => { this.grassImageLoaded = false; };
     this.grassImage.src = _base.replace(/\/$/, '') + '/assets/grass.png';
 
-      window.setWatercolorPalette = (pal) => this.setWatercolorPalette(pal);
+      this._previousSetWatercolorPalette = window.setWatercolorPalette;
+      this._setPaletteHook = (pal) => this.setWatercolorPalette(pal);
+      window.setWatercolorPalette = this._setPaletteHook;
+      this._cleanupFns.push(() => {
+        if (window.setWatercolorPalette === this._setPaletteHook) {
+          if (this._previousSetWatercolorPalette !== undefined) {
+            window.setWatercolorPalette = this._previousSetWatercolorPalette;
+          } else {
+            delete window.setWatercolorPalette;
+          }
+        }
+        this._setPaletteHook = null;
+        this._previousSetWatercolorPalette = null;
+      });
 
       this.setupPhysics();
       this.setupCanvas();
@@ -614,12 +645,21 @@
         this.boundaries.push(seg);
       }
 
-      Matter.Events.on(this.engine, 'collisionStart', (event) => {
+      this._collisionHandler = (event) => {
         event.pairs.forEach(pair => {
           if (pair.bodyA.label === 'player' || pair.bodyB.label === 'player') {
             this.audioManager.playCollisionSound();
           }
         });
+      };
+      Matter.Events.on(this.engine, 'collisionStart', this._collisionHandler);
+      this._cleanupFns.push(() => {
+        try {
+          Matter.Events.off(this.engine, 'collisionStart', this._collisionHandler);
+        } catch (err) {
+          logDevError('Failed to remove collision handler', err);
+        }
+        this._collisionHandler = null;
       });
     }
 
@@ -660,8 +700,13 @@
         // initialize camera zoom to the fit zoom so the whole world is visible on load
         this.camera.zoom = this.worldFitZoom;
       };
+      this._resizeHandler = resize;
       resize();
-      window.addEventListener('resize', resize);
+      window.addEventListener('resize', this._resizeHandler);
+      this._cleanupFns.push(() => {
+        window.removeEventListener('resize', this._resizeHandler);
+        this._resizeHandler = null;
+      });
     }
 
     generateOutsideTexture(canvas, baseColor = '#6B9080') {
@@ -1050,7 +1095,9 @@
           driftFactor,
           driftPhase,
           driftFreq,
-          driftAmp
+          driftAmp,
+          // pick a random visual variant index for this leaf (may map to null image if load failed)
+          variantIndex: Math.floor(Math.random() * (this.leafVariants && this.leafVariants.length ? this.leafVariants.length : 1))
         };
         this.entities.push(ent);
         this.leafEntities.push(ent);
@@ -1213,20 +1260,35 @@
         this.player.isDragging = false;
       };
 
-  // register touch listeners as non-passive so preventDefault() works and input isn't delayed
-  this.canvas.addEventListener('mousedown', onDown, { passive: false });
-  this.canvas.addEventListener('mousemove', onMove, { passive: false });
-  this.canvas.addEventListener('mouseup', onUp, { passive: false });
-  this.canvas.addEventListener('touchstart', onDown, { passive: false });
-      this.canvas.addEventListener('dblclick', (e) => {
+      const onDblClick = (e) => {
         e.preventDefault();
         // Always spawn whirlpool at the waterblob/player position on dblclick
         const wpX = this.player.body && this.player.body.position ? this.player.body.position.x : this.player.x;
         const wpY = this.player.body && this.player.body.position ? this.player.body.position.y : this.player.y;
         this.createWhirlpool(wpX, wpY);
-      });
-      this.canvas.addEventListener('touchmove', onMove, { passive: false });
-      this.canvas.addEventListener('touchend', onUp, { passive: false });
+      };
+
+      const canvas = this.canvas;
+      if (canvas) {
+        // register touch listeners as non-passive so preventDefault() works and input isn't delayed
+        canvas.addEventListener('mousedown', onDown, { passive: false });
+        canvas.addEventListener('mousemove', onMove, { passive: false });
+        canvas.addEventListener('mouseup', onUp, { passive: false });
+        canvas.addEventListener('touchstart', onDown, { passive: false });
+        canvas.addEventListener('dblclick', onDblClick, { passive: false });
+        canvas.addEventListener('touchmove', onMove, { passive: false });
+        canvas.addEventListener('touchend', onUp, { passive: false });
+
+        this._cleanupFns.push(() => {
+          canvas.removeEventListener('mousedown', onDown, false);
+          canvas.removeEventListener('mousemove', onMove, false);
+          canvas.removeEventListener('mouseup', onUp, false);
+          canvas.removeEventListener('touchstart', onDown, false);
+          canvas.removeEventListener('dblclick', onDblClick, false);
+          canvas.removeEventListener('touchmove', onMove, false);
+          canvas.removeEventListener('touchend', onUp, false);
+        });
+      }
     }
 
     setupUI() {
@@ -1238,17 +1300,34 @@
         }
       };
 
-      document.getElementById('pauseBtn').addEventListener('click', async () => {
-        await tryResumeAudio();
-        this.paused = !this.paused;
-        document.getElementById('pauseBtn').textContent = this.paused ? '▶' : '⏸';
-      });
+      const pauseBtn = document.getElementById('pauseBtn');
+      const muteBtn = document.getElementById('muteBtn');
 
-      document.getElementById('muteBtn').addEventListener('click', async () => {
-        await tryResumeAudio();
-        this.audioManager.setMuted(!this.audioManager.muted);
-        document.getElementById('muteBtn').textContent = this.audioManager.muted ? '🔇' : '🔊';
-      });
+      if (pauseBtn) {
+        this._onPauseClick = async () => {
+          await tryResumeAudio();
+          this.paused = !this.paused;
+          pauseBtn.textContent = this.paused ? '▶' : '⏸';
+        };
+        pauseBtn.addEventListener('click', this._onPauseClick);
+        this._cleanupFns.push(() => {
+          pauseBtn.removeEventListener('click', this._onPauseClick);
+          this._onPauseClick = null;
+        });
+      }
+
+      if (muteBtn) {
+        this._onMuteClick = async () => {
+          await tryResumeAudio();
+          this.audioManager.setMuted(!this.audioManager.muted);
+          muteBtn.textContent = this.audioManager.muted ? '🔇' : '🔊';
+        };
+        muteBtn.addEventListener('click', this._onMuteClick);
+        this._cleanupFns.push(() => {
+          muteBtn.removeEventListener('click', this._onMuteClick);
+          this._onMuteClick = null;
+        });
+      }
     }
 
     // Animate camera zoom from current zoom to targetGameplayZoom over `duration` ms.
@@ -1329,10 +1408,9 @@
       this.audioManager.playWhirlpoolSound();
     }
 
-    update(dt) {
+    update(dt, frameTimeSeconds) {
       if (this.paused) return;
 
-      const dtSec = dt / 1000;
       Matter.Engine.update(this.engine, dt);
 
       if (this.player.inputTarget) {
@@ -1353,31 +1431,37 @@
 
       this.rippleTimer += dt;
       const speed2 = this.player.body.velocity.x ** 2 + this.player.body.velocity.y ** 2;
-      if (speed2 > 0.5 * 0.5 && this.rippleTimer > 250) {
+      if (speed2 > 0.25 && this.rippleTimer > 250) {
         this.createRipple(this.player.x, this.player.y);
         this.rippleTimer = 0;
       }
 
-      this.ripples = this.ripples.filter(r => {
+      let rippleWrite = 0;
+      for (let i = 0; i < this.ripples.length; i++) {
+        const r = this.ripples[i];
         r.age += dt;
-        return r.age < r.life;
-      });
+        if (r.age < r.life) {
+          this.ripples[rippleWrite++] = r;
+        }
+      }
+      this.ripples.length = rippleWrite;
 
-      this.whirlpools = this.whirlpools.filter(w => {
-        w.age += dt;
-        const progress = w.age / w.life;
-        const radius = w.maxRadius * progress;
+      let whirlWrite = 0;
+      for (let i = 0; i < this.whirlpools.length; i++) {
+  const w = this.whirlpools[i];
+  w.age += dt;
+  const progress = w.life > 0 ? Math.min(1, w.age / w.life) : 1;
 
-        // Apply whirlpool forces to fish, leaves and lilypads (iterate typed arrays for less overhead)
         const applyTo = (list) => {
-          for (let i = 0; i < list.length; i++) {
-            const entity = list[i];
+          for (let j = 0; j < list.length; j++) {
+            const entity = list[j];
             const ex = entity.body.position.x - w.x;
             const ey = entity.body.position.y - w.y;
-            const dist2 = ex*ex + ey*ey;
-            if (dist2 > w.maxRadius * w.maxRadius) continue;
+            const dist2 = ex * ex + ey * ey;
+            const maxRadius2 = w.maxRadius * w.maxRadius;
+            if (dist2 > maxRadius2) continue;
 
-            const dist = Math.sqrt(dist2) || 0.0001; // compute sqrt only when inside radius
+            const dist = Math.sqrt(dist2) || 0.0001;
             const nx = ex / dist;
             const ny = ey / dist;
 
@@ -1392,14 +1476,11 @@
               x: ny * tangential,
               y: -nx * tangential
             });
-            // If the entity is a lilypad and within a tighter inner radius, visually transform it
-            try {
-              if (entity.type === 'lilypad' && !entity.transformed) {
-                const dist = Math.sqrt(dist2) || 0.0001;
-                // transform when inside ~60% of whirlpool max radius and while whirlpool is active
+
+            if (entity.type === 'lilypad' && !entity.transformed) {
+              try {
                 if (dist < w.maxRadius * 0.6 && progress < 0.9) {
                   entity.transformed = true;
-                  // select bloom image based on variant mapping
                   const v = entity.variantIndex || 0;
                   const choices = this.bloomVariants[v] || [];
                   if (choices.length > 0) {
@@ -1407,9 +1488,9 @@
                     entity.currentBloom = this.bloomImages[pick] || null;
                   }
                 }
+              } catch (e) {
+                logDevError('Lilypad transform failed', e);
               }
-            } catch (e) {
-              logDevError('Lilypad transform failed', e);
             }
           }
         };
@@ -1418,23 +1499,23 @@
         applyTo(this.leafEntities);
         applyTo(this.lilypadEntities);
 
-        return w.age < w.life;
-      });
+        if (w.age < w.life) {
+          this.whirlpools[whirlWrite++] = w;
+        }
+      }
+      this.whirlpools.length = whirlWrite;
 
-      // Check win condition: all lilypads transformed into blooms
       try {
         const total = this.lilypadEntities.length || 0;
         if (total > 0) {
           const transformed = this.lilypadEntities.filter(e => e.transformed).length;
           if (transformed === total && !this._winTriggered) {
             this._winTriggered = true;
-            // animate camera out to show whole world, then pause and show win UI
             try {
               this.zoomToWorld(1400).then(() => {
                 this.paused = true;
                 setWin(true);
               }).catch((err) => {
-                // if animation fails, still pause and show win
                 logDevError('zoomToWorld failed', err);
                 this._suspendCameraFollow = false;
                 this.paused = true;
@@ -1451,45 +1532,46 @@
         logDevError('Win check failed', e);
       }
 
-      // Build spatial hash for neighbor queries (near-linear neighbor lookup)
       this._cellSize = this.FISH_NEIGHBOR_DISTANCE || 140;
-      this._spatialHash = Object.create(null);
+      const hash = this._spatialHash;
+      const keyList = this._spatialHashKeyList;
+      for (let i = 0; i < keyList.length; i++) {
+        const bucket = hash[keyList[i]];
+        if (bucket) bucket.length = 0;
+      }
+      keyList.length = 0;
+
       const insertToHash = (entity) => {
         const x = entity.body.position.x;
         const y = entity.body.position.y;
         const cx = Math.floor(x / this._cellSize);
         const cy = Math.floor(y / this._cellSize);
         const key = cx + ':' + cy;
-        let bucket = this._spatialHash[key];
+        let bucket = hash[key];
         if (!bucket) {
           bucket = [];
-          this._spatialHash[key] = bucket;
+          hash[key] = bucket;
         }
+        if (bucket.length === 0) keyList.push(key);
         bucket.push(entity);
       };
       for (let i = 0; i < this.fishEntities.length; i++) insertToHash(this.fishEntities[i]);
       for (let i = 0; i < this.leafEntities.length; i++) insertToHash(this.leafEntities[i]);
 
-  // Update fish and leaves using typed arrays (no per-frame filter allocations)
-  // Run neighbor checks every physics step to avoid oscillation caused by
-  // intermittent steering updates that can lead to jerky forces.
-  const neighborCheckThisFrame = true;
+      const neighborCheckThisFrame = true;
       for (let i = 0; i < this.fishEntities.length; i++) {
-        this.updateFish(this.fishEntities[i], dt, neighborCheckThisFrame);
+        this.updateFish(this.fishEntities[i], dt, neighborCheckThisFrame, frameTimeSeconds);
       }
       for (let i = 0; i < this.leafEntities.length; i++) {
-        this.updateLeaf(this.leafEntities[i], dt);
+        this.updateLeaf(this.leafEntities[i], dt, frameTimeSeconds);
       }
 
-      // update shared leaf drift timer and refresh gust when needed
       this.sharedLeafDriftTimer -= dt;
       if (this.sharedLeafDriftTimer <= 0) {
         this.sharedLeafDrift.vx = (Math.random() - 0.5) * 5;
         this.sharedLeafDrift.vy = (Math.random() - 0.5) * 5;
         this.sharedLeafDriftTimer = 3000 + Math.random() * 3000;
       }
-
-      // Leaf repulsion removed (natural collisions handled by Matter.js)
 
       const targetCameraX = this.player.x;
       const targetCameraY = this.player.y;
@@ -1499,7 +1581,7 @@
       }
     }
 
-  updateFish(entity, dt, neighborCheck = true) {
+  updateFish(entity, dt, neighborCheck = true, frameTimeSeconds = null) {
       const dx = this.player.x - entity.body.position.x;
       const dy = this.player.y - entity.body.position.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
@@ -1595,9 +1677,9 @@
                   // compute an effective separation distance; when both fish are
                   // effectively idle we add a small padding so they keep a little
                   // extra space between their bodies (reduces overlap visually).
-                  const vA = Math.sqrt(entity.body.velocity.x * entity.body.velocity.x + entity.body.velocity.y * entity.body.velocity.y);
-                  const vB = Math.sqrt(other.body.velocity.x * other.body.velocity.x + other.body.velocity.y * other.body.velocity.y);
-                  const bothIdle = vA < 0.06 && vB < 0.06 && entity.fleeTimer <= 0 && (other.fleeTimer || 0) <= 0;
+          const vA = Math.sqrt(entity.body.velocity.x * entity.body.velocity.x + entity.body.velocity.y * entity.body.velocity.y);
+          const vB = Math.sqrt(other.body.velocity.x * other.body.velocity.x + other.body.velocity.y * other.body.velocity.y);
+          const bothIdle = vA < 0.06 && vB < 0.06 && entity.fleeTimer <= 0 && (other.fleeTimer || 0) <= 0;
                   const effectiveSep = this.FISH_SEPARATION_DISTANCE + (bothIdle ? this.FISH_MIN_PADDING : 0);
                   if (odist < effectiveSep && odist > 0) {
                       const overlapFrac = Math.max(0, (effectiveSep - odist) / effectiveSep);
@@ -1655,7 +1737,7 @@
         let fy = wanderY + inwardY + cohesionY + alignY;
 
         // Occasionally pick a far-away random goal when the fish has been idle/slow
-        const t = performance.now() / 1000;
+  const t = frameTimeSeconds != null ? frameTimeSeconds : performance.now() / 1000;
         const vx = entity.body.velocity.x;
         const vy = entity.body.velocity.y;
         const speed = Math.sqrt(vx * vx + vy * vy);
@@ -1743,11 +1825,11 @@
       }
     }
 
-    updateLeaf(entity, dt) {
+    updateLeaf(entity, dt, frameTimeSeconds = null) {
       // apply shared gust vector to leaves with a tiny per-leaf variation so
       // they don't all move at exactly the same velocity. This adds a slow
       // oscillation and a per-leaf multiplier.
-      const t = performance.now() / 1000;
+      const t = frameTimeSeconds != null ? frameTimeSeconds : performance.now() / 1000;
       const phase = (entity.driftPhase || 0) + t * (entity.driftFreq || 1);
       const osc = 1 + Math.sin(phase) * (entity.driftAmp || 0);
       const factor = (entity.driftFactor || 1) * osc;
@@ -1891,7 +1973,9 @@
     }
 
     drawLeaves(ctx, time) {
-      const useImage = this.leafImageLoaded && this.leafImage && this.leafImage.complete && this.leafImage.naturalWidth > 0;
+      // consider variant images as well as the legacy single leaf image
+      const variantAvailable = this.leafVariantImages && this.leafVariantImages.some(img => img && img.complete && img.naturalWidth > 0);
+      const useImage = variantAvailable || (this.leafImageLoaded && this.leafImage && this.leafImage.complete && this.leafImage.naturalWidth > 0);
       for (let i = 0; i < this.leafEntities.length; i++) {
         const entity = this.leafEntities[i];
         const pos = entity.body.position;
@@ -1901,11 +1985,19 @@
         ctx.scale(breathScale, breathScale);
   ctx.rotate(entity.body.angle || 0);
         if (useImage) {
-          const iw = this.leafImage.naturalWidth;
-          const ih = this.leafImage.naturalHeight;
-          const targetSize = entity.radius * 2.5;
-          const scale = targetSize / Math.max(iw, ih);
-          ctx.drawImage(this.leafImage, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale);
+          // choose per-leaf variant if available, otherwise fall back to legacy leafImage
+          let img = this.leafImage;
+          if (this.leafVariantImages && typeof entity.variantIndex === 'number') {
+            const v = this.leafVariantImages[entity.variantIndex];
+            if (v && v.complete && v.naturalWidth > 0) img = v;
+          }
+          if (img && img.naturalWidth > 0) {
+            const iw = img.naturalWidth || img.width || 1;
+            const ih = img.naturalHeight || img.height || 1;
+            const targetSize = entity.radius * 2.5;
+            const scale = targetSize / Math.max(iw, ih);
+            try { ctx.drawImage(img, -iw * 0.5 * scale, -ih * 0.5 * scale, iw * scale, ih * scale); } catch (e) { /* ignore drawing errors */ }
+          }
         } else {
           ctx.fillStyle = '#cbecc7';
           ctx.beginPath();
@@ -1920,15 +2012,23 @@
       // Draw fish in a stable order based on their Y position so overlapping
       // sprites don't flicker when small position jitter changes render order.
       // We create a shallow sorted copy to avoid reordering the simulation list.
-      const sorted = this.fishEntities.slice().sort((a, b) => {
+      const order = this._fishDrawOrder;
+      const count = this.fishEntities.length;
+      if (order.length !== count) {
+        order.length = count;
+        for (let i = 0; i < count; i++) order[i] = i;
+      }
+      order.sort((ia, ib) => {
+        const a = this.fishEntities[ia];
+        const b = this.fishEntities[ib];
         const ay = a.body.position.y || 0;
         const by = b.body.position.y || 0;
         if (ay === by) return (a.body.id || 0) - (b.body.id || 0);
         return ay - by;
       });
 
-      for (let i = 0; i < sorted.length; i++) {
-        const entity = sorted[i];
+      for (let i = 0; i < order.length; i++) {
+        const entity = this.fishEntities[order[i]];
         const pos = entity.body.position;
         // apply any computed visual offset (smoothed per-entity)
         const vo = entity._visualOffset || { x: 0, y: 0 };
@@ -1986,8 +2086,9 @@
       // naive O(N^2) for small N (35 fish) is fine; only look for very close neighbors
       for (let i = 0; i < this.fishEntities.length; i++) {
         const a = this.fishEntities[i];
-        const ax = a.body.position.x;
-        const ay = a.body.position.y;
+  const ax = a.body.position.x;
+  const ay = a.body.position.y;
+  const speedA = Math.sqrt(a.body.velocity.x * a.body.velocity.x + a.body.velocity.y * a.body.velocity.y);
         let ox = 0, oy = 0;
         let count = 0;
         for (let j = 0; j < this.fishEntities.length; j++) {
@@ -1997,14 +2098,17 @@
           const by = b.body.position.y;
           const dx = bx - ax;
           const dy = by - ay;
-          const d = Math.sqrt(dx * dx + dy * dy) || 0.0001;
-          const effectiveSep = this.FISH_SEPARATION_DISTANCE + ( (Math.sqrt(a.body.velocity.x*a.body.velocity.x + a.body.velocity.y*a.body.velocity.y) < 0.06 && Math.sqrt(b.body.velocity.x*b.body.velocity.x + b.body.velocity.y*b.body.velocity.y) < 0.06) ? this.FISH_MIN_PADDING : 0);
-          if (d < Math.max(1, effectiveSep)) {
-            // push a away vector (smaller magnitude than physics nudge)
+          const dist2 = dx * dx + dy * dy;
+    const speedB = Math.sqrt(b.body.velocity.x * b.body.velocity.x + b.body.velocity.y * b.body.velocity.y);
+    const effectiveSep = this.FISH_SEPARATION_DISTANCE + ((speedA < 0.06 && speedB < 0.06) ? this.FISH_MIN_PADDING : 0);
+          const maxDist = Math.max(1, effectiveSep);
+          if (dist2 < maxDist * maxDist) {
+            const d = Math.sqrt(dist2) || 0.0001;
             const push = (effectiveSep - d) / effectiveSep;
-            ox -= (dx / d) * push * 0.7; // scale down to keep subtle
+            ox -= (dx / d) * push * 0.7;
             oy -= (dy / d) * push * 0.7;
             count++;
+            if (count >= 6) break;
           }
         }
         if (count > 0) {
@@ -2020,7 +2124,7 @@
       }
     }
 
-    render() {
+    render(timeSeconds = null) {
       const ctx = this.ctx;
       const dpr = this.dpr;
 
@@ -2113,7 +2217,7 @@
       ctx.strokeStyle = '#e5e5e5';
       ctx.lineWidth = 3;
       ctx.stroke();
-      const time = performance.now() / 1000;
+  const time = typeof timeSeconds === 'number' ? timeSeconds : performance.now() / 1000;
       this.drawRocks(ctx, time);
       this.drawLilypads(ctx, time);
       this.drawLeaves(ctx, time);
@@ -2190,22 +2294,92 @@
     }
 
     loop() {
+      if (this._destroyed) return;
+
       const now = performance.now();
       const dt = Math.min(now - this.lastTime, 100);
       this.lastTime = now;
+      const nowSeconds = now / 1000;
+      this._frameTimeSeconds = nowSeconds;
 
-      // accumulate time and step physics at fixed rate to reduce CPU
       this._physicsAccumulator += dt;
       while (this._physicsAccumulator >= this._physicsStepMs) {
-        // pass a fixed step in ms to update so physics runs at stable rate
-        this.update(this._physicsStepMs);
+        this.update(this._physicsStepMs, nowSeconds);
         this._physicsAccumulator -= this._physicsStepMs;
       }
 
-      // render with the partial dt (no physics update here)
-      this.render();
+      this.render(nowSeconds);
 
-      requestAnimationFrame(() => this.loop());
+      if (this._destroyed) return;
+      this._rafId = requestAnimationFrame(this.loop);
+    }
+
+    destroy() {
+      if (this._destroyed) return;
+      this._destroyed = true;
+
+      if (this._rafId !== null) {
+        try {
+          cancelAnimationFrame(this._rafId);
+        } catch (e) {
+          logDevError('Failed to cancel animation frame', e);
+        }
+        this._rafId = null;
+      }
+
+      for (let i = this._cleanupFns.length - 1; i >= 0; i--) {
+        const fn = this._cleanupFns[i];
+        if (typeof fn === 'function') {
+          try {
+            fn();
+          } catch (err) {
+            logDevError('Cleanup handler failed', err);
+          }
+        }
+      }
+      this._cleanupFns.length = 0;
+
+      try {
+        if (typeof Matter !== 'undefined') {
+          if (this.engine && this.engine.world) {
+            Matter.World.clear(this.engine.world, false);
+          }
+          if (this.engine) {
+            Matter.Engine.clear(this.engine);
+          }
+        }
+      } catch (err) {
+        logDevError('Matter cleanup failed', err);
+      }
+
+      try {
+        if (this.audioManager && this.audioManager.ctx && typeof this.audioManager.ctx.close === 'function') {
+          const closeResult = this.audioManager.ctx.close();
+          if (closeResult && typeof closeResult.catch === 'function') {
+            closeResult.catch(() => {});
+          }
+        }
+      } catch (err) {
+        logDevError('Audio context close failed', err);
+      }
+
+      this.audioManager = null;
+      this.canvas = null;
+      this.ctx = null;
+      this.entities = [];
+      this.fishEntities = [];
+      this.leafEntities = [];
+      this.rockEntities = [];
+      this.lilypadEntities = [];
+  this.ripples = [];
+  this.whirlpools = [];
+      this._spatialHash = Object.create(null);
+      this._spatialHashKeyList = [];
+      this._fishDrawOrder = [];
+      this.engine = null;
+      this.boundaries = [];
+      this.player = null;
+      this.camera = null;
     }
   }
 
@@ -2213,6 +2387,17 @@
     // create the game and pause it until the user presses Start
     game = new LittledropGame();
     game.paused = true;
+  });
+
+  onDestroy(() => {
+    if (game && typeof game.destroy === 'function') {
+      try {
+        game.destroy();
+      } catch (e) {
+        logDevError('Game destroy failed', e);
+      }
+    }
+    game = null;
   });
 </script>
 
@@ -2339,7 +2524,7 @@
   <div id="splashOverlay">
     <div id="splashCard">
       <h1>Congratulations!</h1>
-      <p> Thank you, Littledrop 💧<br>🍂🍂🍂<br>The pond is blooming ✨<br>🌸🌺🌼</p>
+      <p> Thank you, Littledrop 💧<br>The pond is blooming ✨<br>🌿 🍃 🌱<br>🌸 🌺 🌼</p>
   <button id="playAgainBtn" on:click={() => playAgain()}>Play Again</button>
     </div>
   </div>
