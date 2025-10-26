@@ -1120,7 +1120,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 12 + Math.random() * 8;
+        const radius = 10 + Math.random() * 9;
         const body = Bodies.circle(x, y, radius, {
           frictionAir: 0.15,
           density: 0.001,
