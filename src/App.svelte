@@ -402,7 +402,7 @@
       this.worldRadius = this.worldDiameter / 2;
       this.worldCenter = { x: this.worldRadius, y: this.worldRadius };
 
-      this.mobileZoomFactor = 0.75;
+      this.mobileZoomFactor = 0.8;
 
       // Constants for game physics and behavior
       this.FISH_FLEE_FORCE = 0.0006;
@@ -493,7 +493,7 @@
     this.fishTexturePool = Array.from({ length: this._fishTextureConfig.poolSize }, () => null);
     this._fishPatternColorCache = {};
       // default palette
-      this.watercolorPalette = ['#AAC6EE', '#6290C8', '#D9F7FA', '#C7CBE5', '#DADDE7'];
+      this.watercolorPalette = ['#AAC6EE', '#427cc2', '#D9F7FA'];
 
   // typed entity lists to avoid per-frame filtering
   this.fishEntities = [];
@@ -754,20 +754,20 @@
       ctx.globalAlpha = 1;
     }
 
-    generateWatercolor(canvas, palette = ['#AAC6EE', '#6290C8', '#D9F7FA']) {
+    generateWatercolor(canvas, palette = ['#AAC6EE', '#427cc2', '#D9F7FA']) {
       const ctx = canvas.getContext('2d');
       const width = canvas.width;
       const height = canvas.height;
 
       ctx.clearRect(0, 0, width, height);
       ctx.save();
-      ctx.fillStyle = '#ddeded';
+      ctx.fillStyle = '#d3eded';
       ctx.fillRect(0, 0, width, height);
 
       ctx.filter = 'blur(4px)';
       ctx.globalCompositeOperation = 'source-over';
 
-      for (let i = 0; i < 140; i++) {
+      for (let i = 0; i < 100; i++) {
         const color = palette[Math.floor(Math.random() * palette.length)];
         const x = Math.random() * width;
         const y = Math.random() * height;
@@ -2507,7 +2507,7 @@
     text-align: center;
   }
 
-  #splashCard h1 { margin-bottom: 8px; font-size: 28px; }
+  #splashCard h1 { color: #444; margin-bottom: 8px; font-size: 28px; }
   #splashCard p { color: #444; margin-bottom: 18px; }
 
   #startBtn {
