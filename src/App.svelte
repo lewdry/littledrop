@@ -464,7 +464,7 @@
   this._frameTimeSeconds = _now / 1000;
       this.rippleTimer = 0;
   // fixed physics timestep (ms) and accumulator to reduce physics CPU
-  this._physicsStepMs = 1000 / 30; // 30 Hz physics
+  this._physicsStepMs = 1000 / 60; // 60 Hz physics
   this._physicsAccumulator = 0;
     // win guard to avoid retriggering the win animation
     this._winTriggered = false;
@@ -1037,7 +1037,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 10 + Math.random() * 15;
+        const radius = 15 + Math.random() * 15;
         const body = Bodies.circle(x, y, radius, { isStatic: true, label: 'rock' });
         // assign a random rotation to the rock and set the Matter body angle
         const rotation = Math.random() * Math.PI * 2;
@@ -1053,7 +1053,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 45;
+        const radius = 40 + Math.random() * 10;
         const angle = Math.random() * Math.PI * 2;
         const body = Bodies.circle(x, y, radius, {
           frictionAir: 0.03,
@@ -1075,7 +1075,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 20;
+        const radius = 17 + Math.random() * 2;
         const body = Bodies.circle(x, y, radius, {
           frictionAir: 0.01,
           restitution: 0.5,
@@ -1120,7 +1120,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 16;
+        const radius = 12 + Math.random() * 8;
         const body = Bodies.circle(x, y, radius, {
           frictionAir: 0.15,
           density: 0.001,
