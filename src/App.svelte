@@ -153,7 +153,9 @@
         if (!AudioCtx) {
           throw new Error('Web Audio API not supported');
         }
-        this.ctx = new AudioCtx();
+        // Use 'playback' latencyHint to ensure audio plays as media (not system sounds)
+        // This allows audio to play on iOS even when silent mode is enabled
+        this.ctx = new AudioCtx({ latencyHint: 'playback' });
         this.master = this.ctx.createGain();
         this.master.connect(this.ctx.destination);
         this.master.gain.value = 0.9;
