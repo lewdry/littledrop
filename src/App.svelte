@@ -573,9 +573,9 @@
         });
       });
 
-      // load fish sprite images (fish1.png through fish7.png)
+      // load fish sprite images (fish1.png through fish11.png)
       this.fishSpriteImages = [];
-      for (let i = 1; i <= 7; i++) {
+      for (let i = 1; i <= 11; i++) {
         const img = new Image();
         const idx = i - 1;
         img.onload = () => { this.fishSpriteImages[idx] = img; };
@@ -1168,8 +1168,8 @@
         const patternIndex = Math.floor(Math.random() * this._fishTextureConfig.poolSize);
         const textureKey = `${patternIndex}:${color.fill || ''}`;
 
-        // Randomly select a fish sprite (0-6 for fish1.png through fish7.png)
-        const spriteIndex = Math.floor(Math.random() * 7);
+        // Randomly select a fish sprite (0-10 for fish1.png through fish11.png)
+        const spriteIndex = Math.floor(Math.random() * 11);
 
         const fishEnt = {
           type: 'fish',
