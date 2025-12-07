@@ -573,6 +573,23 @@
         });
       });
 
+      // load fish sprite images (fish1.png through fish7.png)
+      this.fishSpriteImages = [];
+      for (let i = 1; i <= 7; i++) {
+        const img = new Image();
+        const idx = i - 1;
+        img.onload = () => { this.fishSpriteImages[idx] = img; };
+        img.onerror = () => { this.fishSpriteImages[idx] = null; };
+        img.src = _base.replace(/\/$/, '') + '/assets/fish' + i + '.png';
+      }
+
+      // load littledrop.png sprite for player character
+      this.littledropImage = new Image();
+      this.littledropImageLoaded = false;
+      this.littledropImage.onload = () => { this.littledropImageLoaded = true; };
+      this.littledropImage.onerror = () => { this.littledropImageLoaded = false; };
+      this.littledropImage.src = _base.replace(/\/$/, '') + '/assets/littledrop.png';
+
     // grass tile image for outside area (preferred repeatable background)
     this.grassImage = new Image();
     this.grassImageLoaded = false;
@@ -1151,6 +1168,9 @@
         const patternIndex = Math.floor(Math.random() * this._fishTextureConfig.poolSize);
         const textureKey = `${patternIndex}:${color.fill || ''}`;
 
+        // Randomly select a fish sprite (0-6 for fish1.png through fish7.png)
+        const spriteIndex = Math.floor(Math.random() * 7);
+
         const fishEnt = {
           type: 'fish',
           body,
@@ -1177,7 +1197,9 @@
           goalWobblePhase: Math.random() * Math.PI * 2,
           goalWobbleFreq: 2 + Math.random() * 2,
           goalWobbleAmp: 0.6 + Math.random() * 1.0,
-          idleTimer: 300 + Math.random() * 800
+          idleTimer: 300 + Math.random() * 800,
+          // sprite index for PNG fish image
+          spriteIndex
         };
         this.entities.push(fishEnt);
         this.fishEntities.push(fishEnt);
@@ -1845,57 +1867,100 @@
     }
 
     drawWaterBlob(ctx, x, y, radius, velocity, timeSeconds = null) {
-      const points = this._blobPoints;
-      // reuse preallocated coord objects to reduce garbage
-      const cache = this._waterBlobCache || { coords: new Array(points) };
-      const coords = cache.coords;
       const speed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
       const stretchFactor = Math.min(speed / 100, 0.4);
       const angle = Math.atan2(velocity.y, velocity.x);
       const nowSeconds = timeSeconds !== null ? timeSeconds : performance.now() / 1000;
 
-      // compute coords each frame using precomputed base cos/sin (cheap trig)
-      for (let i = 0; i < points; i++) {
-        const baseCos = this._blobBaseCos[i];
-        const baseSin = this._blobBaseSin[i];
-        const wobble = Math.sin(nowSeconds * (1.2 + i * 0.08) + i) * 0.08;
-        let r = radius * (1 + wobble);
-        const baseAngle = Math.atan2(baseSin, baseCos);
-        const angleDiff = baseAngle - angle;
-        const stretchInfluence = Math.cos(angleDiff);
-        if (stretchInfluence > 0) r *= (1 + stretchFactor * stretchInfluence);
-        else r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
+      // Wobble/breathing effect (increased intensity)
+      const wobble = 1 + Math.sin(nowSeconds * 2.0) * 0.10;
 
-        // mutate the preallocated object to avoid allocating a new one
-        const c = coords[i];
-        c.x = x + baseCos * r;
-        c.y = y + baseSin * r;
+      // Use littledrop.png sprite if loaded
+      const useSprite = this.littledropImageLoaded && this.littledropImage && this.littledropImage.complete && this.littledropImage.naturalWidth > 0;
+      
+      if (useSprite) {
+        const img = this.littledropImage;
+        const iw = img.naturalWidth;
+        const ih = img.naturalHeight;
+        // Scale based on radius, maintaining aspect ratio
+        const targetSize = radius * 2.5 * wobble;
+        const scale = targetSize / Math.max(iw, ih);
+        const drawW = iw * scale;
+        const drawH = ih * scale;
+
+        ctx.save();
+        ctx.translate(x, y);
+        
+        // Apply stretch in direction of movement
+        if (speed > 0.5) {
+          ctx.rotate(angle);
+          ctx.scale(1 + stretchFactor, 1 - stretchFactor * 0.3);
+          ctx.rotate(-angle);
+        }
+
+        try {
+          ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+        } catch (e) {
+          logDevError('Littledrop sprite draw failed', e);
+        }
+        ctx.restore();
+      } else {
+        // Fallback: draw procedural blob if sprite not loaded
+        /* === COMMENTED OUT PROCEDURAL WATER BLOB RENDERING ===
+        const points = this._blobPoints;
+        // reuse preallocated coord objects to reduce garbage
+        const cache = this._waterBlobCache || { coords: new Array(points) };
+        const coords = cache.coords;
+
+        // compute coords each frame using precomputed base cos/sin (cheap trig)
+        for (let i = 0; i < points; i++) {
+          const baseCos = this._blobBaseCos[i];
+          const baseSin = this._blobBaseSin[i];
+          const wobbleVal = Math.sin(nowSeconds * (1.2 + i * 0.08) + i) * 0.08;
+          let r = radius * (1 + wobbleVal);
+          const baseAngle = Math.atan2(baseSin, baseCos);
+          const angleDiff = baseAngle - angle;
+          const stretchInfluence = Math.cos(angleDiff);
+          if (stretchInfluence > 0) r *= (1 + stretchFactor * stretchInfluence);
+          else r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
+
+          // mutate the preallocated object to avoid allocating a new one
+          const c = coords[i];
+          c.x = x + baseCos * r;
+          c.y = y + baseSin * r;
+        }
+
+        // midpoint smoothing: move to midpoint of last and first, then quadraticCurveTo through midpoints
+        const mid = (a, b) => ({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 });
+        ctx.beginPath();
+        const lastMid = mid(coords[points - 1], coords[0]);
+        ctx.moveTo(lastMid.x, lastMid.y);
+        for (let i = 0; i < points; i++) {
+          const curr = coords[i];
+          const next = coords[(i + 1) % points];
+          const nextMid = mid(curr, next);
+          ctx.quadraticCurveTo(curr.x, curr.y, nextMid.x, nextMid.y);
+        }
+        ctx.closePath();
+
+        const gradient = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, radius);
+        gradient.addColorStop(0, '#e8f7ff');
+        gradient.addColorStop(0.6, '#bfe7ff');
+        gradient.addColorStop(1, '#8dd5ff');
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.beginPath();
+        ctx.arc(x - 5, y - 6, 5, 0, Math.PI * 2);
+        ctx.fill();
+        === END COMMENTED OUT PROCEDURAL WATER BLOB RENDERING === */
+        // Simple fallback circle if sprite hasn't loaded yet
+        ctx.fillStyle = '#8dd5ff';
+        ctx.beginPath();
+        ctx.arc(x, y, radius * wobble, 0, Math.PI * 2);
+        ctx.fill();
       }
-
-      // midpoint smoothing: move to midpoint of last and first, then quadraticCurveTo through midpoints
-      const mid = (a, b) => ({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 });
-      ctx.beginPath();
-      const lastMid = mid(coords[points - 1], coords[0]);
-      ctx.moveTo(lastMid.x, lastMid.y);
-      for (let i = 0; i < points; i++) {
-        const curr = coords[i];
-        const next = coords[(i + 1) % points];
-        const nextMid = mid(curr, next);
-        ctx.quadraticCurveTo(curr.x, curr.y, nextMid.x, nextMid.y);
-      }
-      ctx.closePath();
-
-      const gradient = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, radius);
-      gradient.addColorStop(0, '#e8f7ff');
-      gradient.addColorStop(0.6, '#bfe7ff');
-      gradient.addColorStop(1, '#8dd5ff');
-      ctx.fillStyle = gradient;
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-      ctx.beginPath();
-      ctx.arc(x - 5, y - 6, 5, 0, Math.PI * 2);
-      ctx.fill();
     }
 
     drawRocks(ctx, time) {
@@ -2043,35 +2108,60 @@
         const facing = entity.facing || 1;
         if (facing < 0) ctx.scale(-1, 1);
 
-        const targetW = entity.radius * 3.0;
-        const targetH = entity.radius * 1.4;
-
-        ctx.fillStyle = entity.color.fill;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
-        ctx.fill();
-
-        const texture = this.getFishTexture(entity.patternIndex, entity.color.fill, entity.textureKey);
-        if (texture && texture.width > 0) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
-          ctx.clip();
+        // Draw fish using PNG sprite if available
+        const spriteImg = this.fishSpriteImages && this.fishSpriteImages[entity.spriteIndex];
+        if (spriteImg && spriteImg.complete && spriteImg.naturalWidth > 0) {
+          // Maintain aspect ratio, scale based on entity radius
+          const iw = spriteImg.naturalWidth;
+          const ih = spriteImg.naturalHeight;
+          const targetSize = entity.radius * 4; // base size on radius
+          const scale = targetSize / Math.max(iw, ih);
+          const drawW = iw * scale;
+          const drawH = ih * scale;
           try {
-            ctx.drawImage(texture, -targetW / 2, -targetH / 2, targetW, targetH);
+            ctx.drawImage(spriteImg, -drawW / 2, -drawH / 2, drawW, drawH);
           } catch (e) {
-            logDevError('Fish texture draw failed', e);
+            logDevError('Fish sprite draw failed', e);
           }
-          ctx.restore();
-        }
+        } else {
+          // Fallback: draw procedural fish if sprite not loaded
+          /* === COMMENTED OUT PROCEDURAL FISH RENDERING ===
+          const targetW = entity.radius * 3.0;
+          const targetH = entity.radius * 1.4;
 
-        ctx.fillStyle = entity.color.fill;
-        ctx.beginPath();
-        ctx.moveTo(-entity.radius * 1.5, 0);
-        ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
-        ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
-        ctx.closePath();
-        ctx.fill();
+          ctx.fillStyle = entity.color.fill;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          const texture = this.getFishTexture(entity.patternIndex, entity.color.fill, entity.textureKey);
+          if (texture && texture.width > 0) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
+            ctx.clip();
+            try {
+              ctx.drawImage(texture, -targetW / 2, -targetH / 2, targetW, targetH);
+            } catch (e) {
+              logDevError('Fish texture draw failed', e);
+            }
+            ctx.restore();
+          }
+
+          ctx.fillStyle = entity.color.fill;
+          ctx.beginPath();
+          ctx.moveTo(-entity.radius * 1.5, 0);
+          ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
+          ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
+          ctx.closePath();
+          ctx.fill();
+          === END COMMENTED OUT PROCEDURAL FISH RENDERING === */
+          // Simple fallback ellipse if sprites haven't loaded yet
+          ctx.fillStyle = entity.color.fill || '#ff9966';
+          ctx.beginPath();
+          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         ctx.restore();
       }
