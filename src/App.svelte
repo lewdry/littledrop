@@ -428,7 +428,7 @@
         y: 1000,
         vx: 0,
         vy: 0,
-        radius: 18,
+        radius: Config.PLAYER_RADIUS,
         isDragging: false,
         inputTarget: null,
         body: null
@@ -447,7 +447,7 @@
       this.audioManager = new AudioManager();
 
       // water blob rendering optimization: fewer points and precomputed base angles
-      this._blobPoints = 9; // reduced from 17
+      this._blobPoints = Config.BLOB_POINTS;
       this._blobBaseCos = new Array(this._blobPoints);
       this._blobBaseSin = new Array(this._blobPoints);
       for (let i = 0; i < this._blobPoints; i++) {
@@ -465,7 +465,7 @@
   this._frameTimeSeconds = _now / 1000;
       this.rippleTimer = 0;
   // fixed physics timestep (ms) and accumulator to reduce physics CPU
-  this._physicsStepMs = 1000 / 60; // 60 Hz physics
+  this._physicsStepMs = Config.PHYSICS_STEP_MS;
   this._physicsAccumulator = 0;
     // win guard to avoid retriggering the win animation
     this._winTriggered = false;
@@ -927,7 +927,7 @@
       const { Bodies, World } = Matter;
 
 
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < Config.ROCK_COUNT; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -943,7 +943,7 @@
         this.rockEntities.push(ent);
       }
 
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < Config.LILYPAD_COUNT; i++) {
         const r = (this.worldRadius - 80) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -965,7 +965,7 @@
         this.lilypadEntities.push(ent);
       }
 
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < Config.LEAF_COUNT; i++) {
         const r = (this.worldRadius - 120) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -1010,7 +1010,7 @@
         { fill: '#474242', stroke: '#474242' }
       ];
 
-      for (let i = 0; i < 35; i++) {
+      for (let i = 0; i < Config.FISH_COUNT; i++) {
         const r = (this.worldRadius - 160) * Math.sqrt(Math.random());
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
@@ -1404,13 +1404,13 @@
             const nx = ex / dist;
             const ny = ey / dist;
 
-            const pushStrength = 0.0032 * (1 - (dist / w.maxRadius)) * (1 - progress);
+            const pushStrength = Config.WHIRLPOOL_PUSH_STRENGTH * (1 - (dist / w.maxRadius)) * (1 - progress);
             Matter.Body.applyForce(entity.body, entity.body.position, {
               x: nx * pushStrength,
               y: ny * pushStrength
             });
 
-            const tangential = w.spin * 0.0012 * (1 - (dist / w.maxRadius)) * (1 - progress);
+            const tangential = w.spin * Config.WHIRLPOOL_TANGENTIAL_FACTOR * (1 - (dist / w.maxRadius)) * (1 - progress);
             Matter.Body.applyForce(entity.body, entity.body.position, {
               x: ny * tangential,
               y: -nx * tangential
@@ -1827,56 +1827,7 @@
         }
         ctx.restore();
       } else {
-        // Fallback: draw procedural blob if sprite not loaded
-        /* === COMMENTED OUT PROCEDURAL WATER BLOB RENDERING ===
-        const points = this._blobPoints;
-        // reuse preallocated coord objects to reduce garbage
-        const cache = this._waterBlobCache || { coords: new Array(points) };
-        const coords = cache.coords;
 
-        // compute coords each frame using precomputed base cos/sin (cheap trig)
-        for (let i = 0; i < points; i++) {
-          const baseCos = this._blobBaseCos[i];
-          const baseSin = this._blobBaseSin[i];
-          const wobbleVal = Math.sin(nowSeconds * (1.2 + i * 0.08) + i) * 0.08;
-          let r = radius * (1 + wobbleVal);
-          const baseAngle = Math.atan2(baseSin, baseCos);
-          const angleDiff = baseAngle - angle;
-          const stretchInfluence = Math.cos(angleDiff);
-          if (stretchInfluence > 0) r *= (1 + stretchFactor * stretchInfluence);
-          else r *= (1 - stretchFactor * 0.3 * Math.abs(stretchInfluence));
-
-          // mutate the preallocated object to avoid allocating a new one
-          const c = coords[i];
-          c.x = x + baseCos * r;
-          c.y = y + baseSin * r;
-        }
-
-        // midpoint smoothing: move to midpoint of last and first, then quadraticCurveTo through midpoints
-        const mid = (a, b) => ({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 });
-        ctx.beginPath();
-        const lastMid = mid(coords[points - 1], coords[0]);
-        ctx.moveTo(lastMid.x, lastMid.y);
-        for (let i = 0; i < points; i++) {
-          const curr = coords[i];
-          const next = coords[(i + 1) % points];
-          const nextMid = mid(curr, next);
-          ctx.quadraticCurveTo(curr.x, curr.y, nextMid.x, nextMid.y);
-        }
-        ctx.closePath();
-
-        const gradient = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, radius);
-        gradient.addColorStop(0, '#e8f7ff');
-        gradient.addColorStop(0.6, '#bfe7ff');
-        gradient.addColorStop(1, '#8dd5ff');
-        ctx.fillStyle = gradient;
-        ctx.fill();
-
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-        ctx.beginPath();
-        ctx.arc(x - 5, y - 6, 5, 0, Math.PI * 2);
-        ctx.fill();
-        === END COMMENTED OUT PROCEDURAL WATER BLOB RENDERING === */
         // Simple fallback circle if sprite hasn't loaded yet
         ctx.fillStyle = '#8dd5ff';
         ctx.beginPath();

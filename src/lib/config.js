@@ -44,7 +44,7 @@ export const PARTICLE_SPEED_MIN = 0.8;
 export const PARTICLE_SPEED_MAX = 2.5;
 export const PARTICLE_SIZE_MIN = 3;
 export const PARTICLE_SIZE_MAX = 8;
-export const PARTICLE_COLORS = ['#FFD700', '#FFA500', '#FF69B4', '#87CEEB', '#98FB98', '#DDA0DD'];
+export const PARTICLE_COLORS = ['#ffcc66', '#ff9966', '#ff6699', '#66ccff', '#1cd9ad', '#cc99ff', '#474242'];
 
 // Rendering
 export const BLOB_POINTS = 9;
