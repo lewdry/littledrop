@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   // Import Matter from the npm package so Vite can bundle it (replaces the old CDN global)
   import * as Matter from 'matter-js';
+  import * as Config from './lib/config.js';
 
   let _isLocalDev = null;
   function isLocalDevHost() {
@@ -399,30 +400,27 @@
       this.loop = this.loop.bind(this);
       this._rafId = null;
 
-      // World is now a circle: 2000px diameter, radius 1000, centered at (1000,1000)
-      this.worldDiameter = 2000;
-      this.worldRadius = this.worldDiameter / 2;
-      this.worldCenter = { x: this.worldRadius, y: this.worldRadius };
+      // World dimensions from config
+      this.worldDiameter = Config.WORLD_DIAMETER;
+      this.worldRadius = Config.WORLD_RADIUS;
+      this.worldCenter = { x: Config.WORLD_CENTER.x, y: Config.WORLD_CENTER.y };
 
-      this.mobileZoomFactor = 0.8;
+      this.mobileZoomFactor = Config.MOBILE_ZOOM_FACTOR;
 
-      // Constants for game physics and behavior
-      this.FISH_FLEE_FORCE = 0.0006;
-      this.FISH_BASE_SPEED = 0.0003;
-      this.FISH_EDGE_FORCE = 0.0006;
-      this.FISH_SEPARATION_FORCE = 0.00012;
-      this.FISH_COHESION_FORCE = 0.00018;
-      this.FISH_ALIGNMENT_FORCE = 0.00008;
-      this.FISH_NEIGHBOR_DISTANCE = 140;
-      this.FISH_SEPARATION_DISTANCE = 40;
-  // additional padding added to separation distance when fish are idle
-      this.FISH_MIN_PADDING = 20;
-      this.LEAF_DRIFT_FORCE = 0.00005;
-      this.PLAYER_MOVE_FORCE = 0.0015;
-
-  // Threshold and cooldown used to stabilize fish facing updates near rest
-  this.FISH_FACING_THRESHOLD = 0.06;
-  this.FISH_FACING_COOLDOWN = 220;
+      // Physics constants from config
+      this.FISH_FLEE_FORCE = Config.FISH_FLEE_FORCE;
+      this.FISH_BASE_SPEED = Config.FISH_BASE_SPEED;
+      this.FISH_EDGE_FORCE = Config.FISH_EDGE_FORCE;
+      this.FISH_SEPARATION_FORCE = Config.FISH_SEPARATION_FORCE;
+      this.FISH_COHESION_FORCE = Config.FISH_COHESION_FORCE;
+      this.FISH_ALIGNMENT_FORCE = Config.FISH_ALIGNMENT_FORCE;
+      this.FISH_NEIGHBOR_DISTANCE = Config.FISH_NEIGHBOR_DISTANCE;
+      this.FISH_SEPARATION_DISTANCE = Config.FISH_SEPARATION_DISTANCE;
+      this.FISH_MIN_PADDING = Config.FISH_MIN_PADDING;
+      this.LEAF_DRIFT_FORCE = Config.LEAF_DRIFT_FORCE;
+      this.PLAYER_MOVE_FORCE = Config.PLAYER_MOVE_FORCE;
+      this.FISH_FACING_THRESHOLD = Config.FISH_FACING_THRESHOLD;
+      this.FISH_FACING_COOLDOWN = Config.FISH_FACING_COOLDOWN;
 
   this.camera = { x: 1000, y: 1000, zoom: 1 };
       this.player = {
@@ -438,8 +436,9 @@
 
       this.ripples = [];
       this.whirlpools = [];
+      this.particles = [];
       this.lastTapTime = 0;
-      this.whirlpoolProximity = 400;
+      this.whirlpoolProximity = Config.WHIRLPOOL_PROXIMITY;
       this.entities = [];
   // shared leaf drift (single gust vector applied to all leaves)
   this.sharedLeafDrift = { vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3 };
@@ -491,9 +490,7 @@
   // offscreen canvas for rock texture
   this.rockTextureCanvas = document.createElement('canvas');
   this.rockTextureCtx = this.rockTextureCanvas.getContext('2d');
-    this._fishTextureConfig = { radius: 16, size: Math.ceil(16 * 3), poolSize: 12 };
-    this.fishTexturePool = Array.from({ length: this._fishTextureConfig.poolSize }, () => null);
-    this._fishPatternColorCache = {};
+    // procedural fish texture code removed — sprites are used instead
       // default palette
       this.watercolorPalette = ['#AAC6EE', '#427cc2', '#D9F7FA'];
 
@@ -920,127 +917,6 @@
       }
     }
 
-    // generate a small offscreen texture for fish that contains ONLY the
-    // pattern (transparent background). The base fill will be drawn when
-    // rendering each fish so patterns can be mixed with any colour.
-    generateFishTexture(canvas, /*fill*/ _fill = null, stroke = '#000000') {
-      const ctx = canvas.getContext('2d');
-      const w = canvas.width;
-      const h = canvas.height;
-      // keep the canvas transparent
-      ctx.clearRect(0, 0, w, h);
-
-      // pick pattern: curved stripes, horizontal stripes, vertical stripes, or dots
-      const patterns = ['stripes', 'hstripes', 'vstripes', 'dots'];
-      const pattern = patterns[Math.floor(Math.random() * patterns.length)];
-
-      if (pattern === 'stripes') {
-        // thinner stripes, less fill coverage
-        const stripeCount = 3 + Math.floor(Math.random() * 3);
-        for (let i = 0; i < stripeCount; i++) {
-          ctx.fillStyle = shadeColor(stroke, -8 + Math.random() * 14);
-          // reduce stripe height and add stronger horizontal jitter
-          const y = (i / stripeCount) * h - h * 0.12 + (Math.random() - 0.5) * h * 0.14;
-          const stripeW = w * (0.45 + Math.random() * 0.2);
-          const stripeH = h * (0.12 + Math.random() * 0.08);
-          ctx.beginPath();
-          ctx.ellipse(w/2 + (Math.random() - 0.5) * w * 0.04, y + h*0.12, stripeW, stripeH, Math.PI * (Math.random() * 0.12 - 0.06), 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else if (pattern === 'hstripes') {
-        // thin horizontal stripes
-        const stripeCount = 3 + Math.floor(Math.random() * 4);
-        for (let i = 0; i < stripeCount; i++) {
-          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
-          const y = (i + 0.5) / stripeCount * h + (Math.random() - 0.5) * h * 0.06;
-          const stripeH = h * (0.07 + Math.random() * 0.04);
-          ctx.beginPath();
-          ctx.ellipse(w/2, y, w * 0.5, stripeH, 0, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else if (pattern === 'vstripes') {
-        // thin vertical stripes
-        const stripeCount = 3 + Math.floor(Math.random() * 4);
-        for (let i = 0; i < stripeCount; i++) {
-          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
-          const x = (i + 0.5) / stripeCount * w + (Math.random() - 0.5) * w * 0.06;
-          const stripeW = w * (0.07 + Math.random() * 0.04);
-          ctx.save();
-          ctx.translate(x, h/2);
-          ctx.beginPath();
-          ctx.ellipse(0, 0, stripeW, h * 0.5, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        }
-      } else {
-        // dots: smaller, more sparse
-        const dotCount = 4 + Math.floor(Math.random() * 6);
-        for (let i = 0; i < dotCount; i++) {
-          ctx.fillStyle = shadeColor(stroke, -6 + Math.random() * 12);
-          const dx = Math.random() * w;
-          const dy = Math.random() * h;
-          const r = Math.max(1.5, Math.random() * (w * 0.08));
-          ctx.beginPath();
-          ctx.arc(dx, dy, r, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-
-    ensureFishPattern(index) {
-      if (!this.fishTexturePool || index < 0 || index >= this.fishTexturePool.length) return null;
-      let canvas = this.fishTexturePool[index];
-      if (!canvas) {
-        const { size } = this._fishTextureConfig;
-        canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        try {
-          this.generateFishTexture(canvas, null, '#444444');
-        } catch (e) {
-          logDevError('Failed to generate fish pattern texture', e);
-          return null;
-        }
-        this.fishTexturePool[index] = canvas;
-      }
-      return canvas;
-    }
-
-    getFishTexture(patternIndex, colorFill, keyOverride = null) {
-      const fill = colorFill || '#000000';
-      const cacheKey = keyOverride || `${patternIndex}:${fill}`;
-      let cached = this._fishPatternColorCache[cacheKey];
-      if (cached) return cached;
-
-      const patternCanvas = this.ensureFishPattern(patternIndex);
-      if (!patternCanvas) return null;
-
-      const { size } = this._fishTextureConfig;
-      const canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        logDevError('Failed to obtain fish tint context', new Error('2D context unavailable'));
-        return null;
-      }
-      try {
-        ctx.clearRect(0, 0, size, size);
-        ctx.drawImage(patternCanvas, 0, 0, size, size);
-        const tint = shadeColor(fill, -14);
-        ctx.globalCompositeOperation = 'source-in';
-        ctx.fillStyle = tint;
-        ctx.fillRect(0, 0, size, size);
-        ctx.globalCompositeOperation = 'source-over';
-      } catch (e) {
-        logDevError('Failed to tint fish pattern', e);
-        return null;
-      }
-
-      this._fishPatternColorCache[cacheKey] = canvas;
-      return canvas;
-    }
-
     setWatercolorPalette(palette) {
       if (!Array.isArray(palette) || palette.length === 0) return;
       this.watercolorPalette = palette.slice();
@@ -1139,7 +1015,7 @@
         const a = Math.random() * Math.PI * 2;
         const x = this.worldCenter.x + Math.cos(a) * r;
         const y = this.worldCenter.y + Math.sin(a) * r;
-        const radius = 10 + Math.random() * 9;
+        const radius = 14 + Math.random() * 4;
         const body = Bodies.circle(x, y, radius, {
           frictionAir: 0.15,
           density: 0.001,
@@ -1165,8 +1041,7 @@
           }
         }
         const color = fishColors[i % fishColors.length];
-        const patternIndex = Math.floor(Math.random() * this._fishTextureConfig.poolSize);
-        const textureKey = `${patternIndex}:${color.fill || ''}`;
+        // procedural pattern/tint support removed (sprites only)
 
         // Randomly select a fish sprite (0-10 for fish1.png through fish11.png)
         const spriteIndex = Math.floor(Math.random() * 11);
@@ -1186,8 +1061,7 @@
           zoomMultiplier: 1,
           inwardBias: 1,
           color,
-          patternIndex,
-          textureKey,
+          // patternIndex/textureKey removed (not used)
           // stable facing: 1 => right, -1 => left. We'll only flip when vx magnitude is significant.
           facing: 1,
           facingSwitchCooldown: 0,
@@ -1434,6 +1308,28 @@
       this.audioManager.playWhirlpoolSound();
     }
 
+    createParticleBurst(x, y) {
+      const count = Config.PARTICLE_COUNT;
+      const colors = Config.PARTICLE_COLORS;
+      for (let i = 0; i < count; i++) {
+        const angle = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+        const speed = Config.PARTICLE_SPEED_MIN + Math.random() * (Config.PARTICLE_SPEED_MAX - Config.PARTICLE_SPEED_MIN);
+        const size = Config.PARTICLE_SIZE_MIN + Math.random() * (Config.PARTICLE_SIZE_MAX - Config.PARTICLE_SIZE_MIN);
+        this.particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          size,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          age: 0,
+          life: Config.PARTICLE_LIFE + Math.random() * 200,
+          rotation: Math.random() * Math.PI * 2,
+          rotationSpeed: (Math.random() - 0.5) * 0.2
+        });
+      }
+    }
+
     update(dt, frameTimeSeconds) {
       if (this.paused) return;
 
@@ -1472,6 +1368,23 @@
       }
       this.ripples.length = rippleWrite;
 
+      // Update particles
+      let particleWrite = 0;
+      for (let i = 0; i < this.particles.length; i++) {
+        const p = this.particles[i];
+        p.age += dt;
+        if (p.age < p.life) {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.01; // slight gravity
+          p.vx *= 0.98; // friction
+          p.vy *= 0.98;
+          p.rotation += p.rotationSpeed;
+          this.particles[particleWrite++] = p;
+        }
+      }
+      this.particles.length = particleWrite;
+
       let whirlWrite = 0;
       for (let i = 0; i < this.whirlpools.length; i++) {
   const w = this.whirlpools[i];
@@ -1505,13 +1418,22 @@
 
             if (entity.type === 'lilypad' && !entity.transformed) {
               try {
-                if (dist < w.maxRadius * 0.6 && progress < 0.9) {
+                if (dist < w.maxRadius * Config.WHIRLPOOL_TRANSFORM_RADIUS && progress < 0.9) {
                   entity.transformed = true;
                   const v = entity.variantIndex || 0;
                   const choices = this.bloomVariants[v] || [];
                   if (choices.length > 0) {
                     const pick = choices[Math.floor(Math.random() * choices.length)];
                     entity.currentBloom = this.bloomImages[pick] || null;
+                  }
+                  // Create particle burst at lilypad position
+                  this.createParticleBurst(entity.body.position.x, entity.body.position.y);
+                  // Play a celebratory note
+                  try {
+                    const noteIdx = Math.floor(Math.random() * 5) + 10; // higher notes
+                    this.audioManager.playXylophoneNote(noteIdx, 0.5);
+                  } catch (e) {
+                    logDevError('Lilypad transform sound failed', e);
                   }
                 }
               } catch (e) {
@@ -2125,37 +2047,7 @@
           }
         } else {
           // Fallback: draw procedural fish if sprite not loaded
-          /* === COMMENTED OUT PROCEDURAL FISH RENDERING ===
-          const targetW = entity.radius * 3.0;
-          const targetH = entity.radius * 1.4;
-
-          ctx.fillStyle = entity.color.fill;
-          ctx.beginPath();
-          ctx.ellipse(0, 0, entity.radius * 1.5, entity.radius * 0.7, 0, 0, Math.PI * 2);
-          ctx.fill();
-
-          const texture = this.getFishTexture(entity.patternIndex, entity.color.fill, entity.textureKey);
-          if (texture && texture.width > 0) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.ellipse(0, 0, targetW / 2, targetH / 2, 0, 0, Math.PI * 2);
-            ctx.clip();
-            try {
-              ctx.drawImage(texture, -targetW / 2, -targetH / 2, targetW, targetH);
-            } catch (e) {
-              logDevError('Fish texture draw failed', e);
-            }
-            ctx.restore();
-          }
-
-          ctx.fillStyle = entity.color.fill;
-          ctx.beginPath();
-          ctx.moveTo(-entity.radius * 1.5, 0);
-          ctx.lineTo(-entity.radius * 2.2, -entity.radius * 0.6);
-          ctx.lineTo(-entity.radius * 2.2, entity.radius * 0.6);
-          ctx.closePath();
-          ctx.fill();
-          === END COMMENTED OUT PROCEDURAL FISH RENDERING === */
+          // procedural fish rendering removed; sprites are used instead
           // Simple fallback ellipse if sprites haven't loaded yet
           ctx.fillStyle = entity.color.fill || '#ff9966';
           ctx.beginPath();
@@ -2384,6 +2276,40 @@
         ctx.restore();
       });
 
+      // Draw particles
+      this.particles.forEach(p => {
+        const progress = p.age / p.life;
+        const alpha = 1 - progress;
+        const scale = 1 - progress * 0.5;
+        
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rotation);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        
+        // Draw a sparkle/star shape
+        const size = p.size * scale;
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          const angle = (i / 4) * Math.PI * 2;
+          const outerX = Math.cos(angle) * size;
+          const outerY = Math.sin(angle) * size;
+          const innerAngle = angle + Math.PI / 4;
+          const innerX = Math.cos(innerAngle) * size * 0.4;
+          const innerY = Math.sin(innerAngle) * size * 0.4;
+          if (i === 0) {
+            ctx.moveTo(outerX, outerY);
+          } else {
+            ctx.lineTo(outerX, outerY);
+          }
+          ctx.lineTo(innerX, innerY);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      });
+
       ctx.restore();
     }
 
@@ -2465,8 +2391,9 @@
       this.leafEntities = [];
       this.rockEntities = [];
       this.lilypadEntities = [];
-  this.ripples = [];
-  this.whirlpools = [];
+      this.ripples = [];
+      this.whirlpools = [];
+      this.particles = [];
       this._spatialHash = Object.create(null);
       this._spatialHashKeyList = [];
       this._fishDrawOrder = [];
